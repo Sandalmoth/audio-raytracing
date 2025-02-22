@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const Input = @import("input.zig");
 const sdl = @import("sdl.zig");
 
 const log = std.log;
@@ -21,7 +22,7 @@ pub fn main() !void {
     const window: *sdl.c.SDL_Window, const renderer: *sdl.c.SDL_Renderer = blk: {
         var window: ?*sdl.c.SDL_Window = null;
         var renderer: ?*sdl.c.SDL_Renderer = null;
-        if (!sdl.c.SDL_CreateWindowAndRenderer("audio-raytracing", 640, 360, 0, &window, &renderer)) {
+        if (!sdl.c.SDL_CreateWindowAndRenderer("audio-raytracing", 800, 600, 0, &window, &renderer)) {
             log.err("SDL_CreateWindowAndRenderer: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
         }
@@ -34,6 +35,13 @@ pub fn main() !void {
         log.err("SDL_SetRenderVSync: {s}", .{sdl.c.SDL_GetError()});
         return error.Sdl;
     }
+
+    var gpa_struct = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_struct.deinit();
+    const gpa = gpa_struct.allocator();
+
+    var input = Input.init(gpa);
+    defer input.deinit();
 
     var frame_timer = try std.time.Timer.start();
     var lag: u64 = 0;
@@ -49,10 +57,12 @@ pub fn main() !void {
                 sdl.c.SDLK_ESCAPE => break :main_loop,
                 else => {},
             };
+            input.accumulate(event);
         }
 
         while (lag >= tick_ns) {
             // update
+            input.decay();
             lag -= tick_ns;
         }
 
