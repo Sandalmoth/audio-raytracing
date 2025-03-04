@@ -284,33 +284,41 @@ pub fn main() !void {
         }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
 
-        // var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
-        // var swapchain_width: u32 = 0;
-        // var swapchain_height: u32 = 0;
-        // if (!sdl.c.SDL_WaitAndAcquireGPUSwapchainTexture(
-        //     command_buffer,
-        //     window,
-        //     &swapchain_texture,
-        //     &swapchain_width,
-        //     &swapchain_height,
-        // )) {
-        //     log.err("SDL_WaitAndAcquireGPUSwapchainTexture: {s}", .{sdl.c.SDL_GetError()});
-        //     return error.Sdl;
-        // }
-        // const color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
-        //     .texture = swapchain_texture,
-        // }};
-        // const depth_target_info = sdl.c.SDL_GPUDepthStencilTargetInfo{
-        //     .texture = swapchain_texture,
-        // };
-        // const render_pass = sdl.c.SDL_BeginGPURenderPass(
-        //     command_buffer,
-        //     &color_target_infos[0],
-        //     color_target_infos.len,
-        //     &depth_target_info,
-        // );
+        var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
+        var swapchain_width: u32 = 0;
+        var swapchain_height: u32 = 0;
+        if (!sdl.c.SDL_WaitAndAcquireGPUSwapchainTexture(
+            command_buffer,
+            window,
+            &swapchain_texture,
+            &swapchain_width,
+            &swapchain_height,
+        )) {
+            log.err("SDL_WaitAndAcquireGPUSwapchainTexture: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        }
+        const color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
+            .texture = swapchain_texture,
+        }};
+        const present_render_pass = sdl.c.SDL_BeginGPURenderPass(
+            command_buffer,
+            &color_target_infos[0],
+            color_target_infos.len,
+            null,
+        );
+        const present_vertex_buffers = [_]sdl.c.SDL_GPUBufferBinding{
+            .{ .buffer = vertex_buffer, .offset = 0 },
+        };
+        sdl.c.SDL_BindGPUVertexBuffers(
+            present_render_pass,
+            0,
+            &present_vertex_buffers[0],
+            present_vertex_buffers.len,
+        );
+        sdl.c.SDL_BindGPUGraphicsPipeline(present_render_pass, present_gpu_pipeline);
+        sdl.c.SDL_DrawGPUPrimitives(present_render_pass, 6, 1, 0, 0);
+        sdl.c.SDL_EndGPURenderPass(present_render_pass);
 
-        // sdl.c.SDL_EndGPURenderPass(render_pass);
         if (!sdl.c.SDL_SubmitGPUCommandBuffer(command_buffer)) {
             log.err("SDL_SubmitGPUCommandBuffer: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
