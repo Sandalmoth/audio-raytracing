@@ -26,6 +26,8 @@ const GameInput = enum {
     left,
     right,
     backward,
+    up,
+    down,
 };
 
 map: std.AutoArrayHashMap(SdlInput, GameInput),

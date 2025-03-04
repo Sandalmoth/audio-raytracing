@@ -59,6 +59,25 @@ pub fn addVec2iVec2i(a: Vec2i, b: Vec2i) Vec2i {
     return .{ .x = a.x + b.x, .y = a.y + b.y };
 }
 
+pub fn subVecVec(a: Vec, b: Vec) Vec {
+    return .{ .data = a.data - b.data };
+}
+
+pub fn subVec2fVec2f(a: Vec2f, b: Vec2f) Vec2f {
+    return .{ .x = a.x - b.x, .y = a.y - b.y };
+}
+
+pub fn subVec2iVec2i(a: Vec2i, b: Vec2i) Vec2i {
+    return .{ .x = a.x - b.x, .y = a.y - b.y };
+}
+
 pub fn mulFloatVec(a: f32, b: Vec) Vec {
     return .{ .data = @as(@Vector(4, f32), @splat(a)) * b.data };
+}
+
+pub fn normalizeVec(a: Vec) Vec {
+    const a2 = a.data * a.data;
+    const inorm = 1.0 / (a2[0] + a2[1] + a2[2]);
+    const b: @Vector(4, f32) = .{ inorm, inorm, inorm, 1.0 };
+    return .{ .data = a.data * b };
 }

@@ -23,8 +23,12 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
-    b.installArtifact(exe);
     exe.root_module.linkLibrary(sdl_lib);
+
+    const build_shader_cmd = b.addSystemCommand(&.{ "sh", "build_shaders.sh" });
+    b.getInstallStep().dependOn(&build_shader_cmd.step);
+
+    b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
