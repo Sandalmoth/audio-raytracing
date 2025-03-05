@@ -64,7 +64,7 @@ pub fn main() !void {
             .num_samplers = 0,
             .num_storage_textures = 0,
             .num_storage_buffers = 0,
-            .num_uniform_buffers = 0,
+            .num_uniform_buffers = 1,
         };
         break :blk sdl.c.SDL_CreateGPUShader(gpu_device, &create_info) orelse {
             log.err("SDL_CreateGPUShader: {s}", .{sdl.c.SDL_GetError()});
@@ -339,7 +339,6 @@ pub fn main() !void {
         }
 
         const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));
-        _ = alpha;
 
         // begin draw
         const command_buffer = sdl.c.SDL_AcquireGPUCommandBuffer(gpu_device) orelse {
@@ -410,6 +409,12 @@ pub fn main() !void {
             .texture = gradient_texture,
             .sampler = sampler,
         }, 1);
+        sdl.c.SDL_PushGPUVertexUniformData(
+            command_buffer,
+            0,
+            &state.camera.vp(alpha),
+            @sizeOf(zm.Mat),
+        );
         sdl.c.SDL_DrawGPUPrimitives(main_render_pass, 3, 1, 6, 0);
         sdl.c.SDL_EndGPURenderPass(main_render_pass);
 
@@ -449,6 +454,12 @@ pub fn main() !void {
             .texture = main_texture,
             .sampler = sampler,
         }, 1);
+        sdl.c.SDL_PushGPUVertexUniformData(
+            command_buffer,
+            0,
+            &zm.identity(),
+            @sizeOf(zm.Mat),
+        );
         sdl.c.SDL_DrawGPUPrimitives(present_render_pass, 6, 1, 0, 0);
         sdl.c.SDL_EndGPURenderPass(present_render_pass);
 
@@ -528,7 +539,7 @@ const Camera = struct {
         // TODO we should interpolate the position
         _ = alpha;
         return zm.mul(
-            zm.lookAtRh(camera.position, camera.position + camera.facing, up),
+            zm.lookAtRh(camera.pos, camera.pos + camera.facing, up),
             zm.perspectiveFovRh(60.0, 4.0 / 3.0, 0.01, 100.0),
         );
     }
