@@ -217,6 +217,21 @@ pub fn main() !void {
     };
     defer sdl.c.SDL_ReleaseGPUTexture(gpu_device, main_depth_texture);
 
+    const gradient_texture = sdl.c.SDL_CreateGPUTexture(gpu_device, &.{
+        .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
+        .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .width = 2,
+        .height = 2,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_1,
+    }) orelse {
+        log.err("SDL_CreateGPUTexture: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    };
+    defer sdl.c.SDL_ReleaseGPUTexture(gpu_device, gradient_texture);
+
     const vertex_buffer = sdl.c.SDL_CreateGPUBuffer(gpu_device, &.{
         .usage = sdl.c.SDL_GPU_BUFFERUSAGE_VERTEX,
         .size = 16 * 1024 * 1024,
@@ -235,11 +250,54 @@ pub fn main() !void {
     };
     defer sdl.c.SDL_ReleaseGPUTransferBuffer(gpu_device, transfer_buffer);
 
-    const sampler = sdl.c.SDL_CreateGPUSampler(gpu_device, &.{}) orelse {
+    const sampler = sdl.c.SDL_CreateGPUSampler(gpu_device, &.{
+        .min_filter = sdl.c.SDL_GPU_FILTER_LINEAR,
+        .mag_filter = sdl.c.SDL_GPU_FILTER_LINEAR,
+        .address_mode_u = sdl.c.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_v = sdl.c.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+    }) orelse {
         log.err("SDL_CreateGPUSampler: {s}", .{sdl.c.SDL_GetError()});
         return error.Sdl;
     };
     defer sdl.c.SDL_ReleaseGPUSampler(gpu_device, sampler);
+
+    { // static texture init
+        const command_buffer = sdl.c.SDL_AcquireGPUCommandBuffer(gpu_device) orelse {
+            log.err("SDL_AcquireGPUCommandBuffer: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        };
+
+        const bytes: [*][4]u8 = @alignCast(@ptrCast(
+            sdl.c.SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, true) orelse {
+                log.err("SDL_MapGPUTransferBuffer: {s}", .{sdl.c.SDL_GetError()});
+                return error.Sdl;
+            },
+        ));
+        @memcpy(
+            bytes,
+            &[_][4]u8{
+                .{ 0, 0, 0, 0xff },
+                .{ 0xff, 0, 0, 0xff },
+                .{ 0, 0xff, 0, 0xff },
+                .{ 0xff, 0xff, 0, 0xff },
+            },
+        );
+        sdl.c.SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
+
+        const copy_pass = sdl.c.SDL_BeginGPUCopyPass(command_buffer);
+        sdl.c.SDL_UploadToGPUTexture(copy_pass, &.{
+            .transfer_buffer = transfer_buffer,
+            .offset = 0,
+            .pixels_per_row = 2,
+            .rows_per_layer = 2,
+        }, &.{ .texture = gradient_texture, .mip_level = 0, .layer = 0, .x = 0, .y = 0, .z = 0, .w = 2, .h = 2, .d = 1 }, true);
+        sdl.c.SDL_EndGPUCopyPass(copy_pass);
+
+        if (!sdl.c.SDL_SubmitGPUCommandBuffer(command_buffer)) {
+            log.err("SDL_SubmitGPUCommandBuffer: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        }
+    }
 
     var input = Input.init(gpa);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_W }, .forward);
@@ -304,6 +362,10 @@ pub fn main() !void {
                 .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 1 } },
                 .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 0 } },
                 .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 1 } },
+                //
+                .{ .pos = .{ -0.5, -0.5, 0 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ -0.5, 0.5, 0 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ 0.5, -0.5, 0 }, .uv = .{ 1, 0 } },
             },
         );
         sdl.c.SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
@@ -314,9 +376,40 @@ pub fn main() !void {
         }, &.{
             .buffer = vertex_buffer,
             .offset = 0,
-            .size = @sizeOf(Vertex) * 6,
+            .size = @sizeOf(Vertex) * 9, // NOTE
         }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
+
+        const main_color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
+            .texture = main_texture,
+        }};
+        const main_render_pass = sdl.c.SDL_BeginGPURenderPass(
+            command_buffer,
+            &main_color_target_infos[0],
+            main_color_target_infos.len,
+            &.{
+                .texture = main_depth_texture,
+                .clear_depth = 1,
+                .load_op = sdl.c.SDL_GPU_LOADOP_CLEAR,
+                .store_op = sdl.c.SDL_GPU_STOREOP_STORE,
+            },
+        );
+        sdl.c.SDL_BindGPUGraphicsPipeline(main_render_pass, main_gpu_pipeline);
+        const main_vertex_buffers = [_]sdl.c.SDL_GPUBufferBinding{
+            .{ .buffer = vertex_buffer, .offset = 0 },
+        };
+        sdl.c.SDL_BindGPUVertexBuffers(
+            main_render_pass,
+            0,
+            &main_vertex_buffers[0],
+            main_vertex_buffers.len,
+        );
+        sdl.c.SDL_BindGPUFragmentSamplers(main_render_pass, 0, &.{
+            .texture = gradient_texture,
+            .sampler = sampler,
+        }, 1);
+        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, 3, 1, 6, 0);
+        sdl.c.SDL_EndGPURenderPass(main_render_pass);
 
         var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
         var swapchain_width: u32 = 0;
@@ -331,13 +424,13 @@ pub fn main() !void {
             log.err("SDL_WaitAndAcquireGPUSwapchainTexture: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
         }
-        const color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
+        const present_color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
             .texture = swapchain_texture,
         }};
         const present_render_pass = sdl.c.SDL_BeginGPURenderPass(
             command_buffer,
-            &color_target_infos[0],
-            color_target_infos.len,
+            &present_color_target_infos[0],
+            present_color_target_infos.len,
             null,
         );
         sdl.c.SDL_BindGPUGraphicsPipeline(present_render_pass, present_gpu_pipeline);
