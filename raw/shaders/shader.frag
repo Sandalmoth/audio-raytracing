@@ -1,9 +1,11 @@
-#version 450
+#version 460
 
-layout(location = 0) in vec3 fragColor;
+layout(location = 0) in vec2 frag_uv;
 
 layout(location = 0) out vec4 out_color;
 
+layout(set = 2, binding = 0) uniform sampler2D tex;
+
 void main() {
-    out_color = vec4(fragColor, 1.0);
+    out_color = texture(tex, frag_uv);
 }

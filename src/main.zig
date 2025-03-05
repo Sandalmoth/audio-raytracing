@@ -13,7 +13,7 @@ pub const tick_ns: u64 = 1000_000_000 / ticks_per_second;
 pub const max_tick_ns: u64 = @intFromFloat(0.1 * 1e9);
 
 pub fn main() !void {
-    var gpa_struct = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_struct: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_struct.deinit();
     const gpa = gpa_struct.allocator();
 
@@ -87,16 +87,34 @@ pub fn main() !void {
             .entrypoint = "main",
             .format = sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
             .stage = sdl.c.SDL_GPU_SHADERSTAGE_FRAGMENT,
-            .num_samplers = 0,
+            .num_samplers = 1,
             .num_storage_textures = 0,
             .num_storage_buffers = 0,
-            .num_uniform_buffers = 0,
+            .num_uniform_buffers = 1,
         };
         break :blk sdl.c.SDL_CreateGPUShader(gpu_device, &create_info) orelse {
             log.err("SDL_CreateGPUShader: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
         };
     };
+
+    const vertex_buffer_descriptions = [_]sdl.c.SDL_GPUVertexBufferDescription{.{
+        .slot = 0,
+        .input_rate = sdl.c.SDL_GPU_VERTEXINPUTRATE_VERTEX,
+        .instance_step_rate = 0,
+        .pitch = @sizeOf(Vertex),
+    }};
+    const vertex_attributes = [_]sdl.c.SDL_GPUVertexAttribute{ .{
+        .buffer_slot = 0,
+        .format = sdl.c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+        .location = 0,
+        .offset = @offsetOf(Vertex, "pos"),
+    }, .{
+        .buffer_slot = 0,
+        .format = sdl.c.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+        .location = 1,
+        .offset = @offsetOf(Vertex, "uv"),
+    } };
 
     const main_color_target_descriptions = [_]sdl.c.SDL_GPUColorTargetDescription{.{
         .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
@@ -105,7 +123,12 @@ pub fn main() !void {
     const main_gpu_pipeline_create_info = sdl.c.SDL_GPUGraphicsPipelineCreateInfo{
         .vertex_shader = vert_shader,
         .fragment_shader = frag_shader,
-        .vertex_input_state = .{},
+        .vertex_input_state = .{
+            .vertex_buffer_descriptions = &vertex_buffer_descriptions[0],
+            .num_vertex_buffers = vertex_buffer_descriptions.len,
+            .vertex_attributes = &vertex_attributes[0],
+            .num_vertex_attributes = vertex_attributes.len,
+        },
         .primitive_type = sdl.c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         .rasterizer_state = .{},
         .multisample_state = .{},
@@ -137,7 +160,12 @@ pub fn main() !void {
     const present_gpu_pipeline_create_info = sdl.c.SDL_GPUGraphicsPipelineCreateInfo{
         .vertex_shader = vert_shader,
         .fragment_shader = frag_shader,
-        .vertex_input_state = .{},
+        .vertex_input_state = .{
+            .vertex_buffer_descriptions = &vertex_buffer_descriptions[0],
+            .num_vertex_buffers = vertex_buffer_descriptions.len,
+            .vertex_attributes = &vertex_attributes[0],
+            .num_vertex_attributes = vertex_attributes.len,
+        },
         .primitive_type = sdl.c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         .rasterizer_state = .{},
         .multisample_state = .{},
@@ -207,6 +235,12 @@ pub fn main() !void {
     };
     defer sdl.c.SDL_ReleaseGPUTransferBuffer(gpu_device, transfer_buffer);
 
+    const sampler = sdl.c.SDL_CreateGPUSampler(gpu_device, &.{}) orelse {
+        log.err("SDL_CreateGPUSampler: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    };
+    defer sdl.c.SDL_ReleaseGPUSampler(gpu_device, sampler);
+
     var input = Input.init(gpa);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_W }, .forward);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_S }, .backward);
@@ -264,12 +298,12 @@ pub fn main() !void {
         @memcpy(
             bytes,
             &[_]Vertex{
-                .{ .pos = .{ 0, 0, 0 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 1, 0, 0 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 1 } },
                 .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 1 } },
-                .{ .pos = .{ 1, 0, 0 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ 0, 1, 0 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 1 } },
             },
         );
         sdl.c.SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
@@ -306,6 +340,7 @@ pub fn main() !void {
             color_target_infos.len,
             null,
         );
+        sdl.c.SDL_BindGPUGraphicsPipeline(present_render_pass, present_gpu_pipeline);
         const present_vertex_buffers = [_]sdl.c.SDL_GPUBufferBinding{
             .{ .buffer = vertex_buffer, .offset = 0 },
         };
@@ -315,7 +350,10 @@ pub fn main() !void {
             &present_vertex_buffers[0],
             present_vertex_buffers.len,
         );
-        sdl.c.SDL_BindGPUGraphicsPipeline(present_render_pass, present_gpu_pipeline);
+        sdl.c.SDL_BindGPUFragmentSamplers(present_render_pass, 0, &.{
+            .texture = main_texture,
+            .sampler = sampler,
+        }, 1);
         sdl.c.SDL_DrawGPUPrimitives(present_render_pass, 6, 1, 0, 0);
         sdl.c.SDL_EndGPURenderPass(present_render_pass);
 
@@ -339,7 +377,7 @@ const State = struct {
                 .yaw = 0.0,
                 .pitch = 0.0,
             },
-            .boxes = std.ArrayList(Box).init(gpa),
+            .boxes = .init(gpa),
         };
 
         try state.boxes.append(.{
