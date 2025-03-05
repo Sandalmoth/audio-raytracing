@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const math = @import("math.zig");
 const sdl = @import("sdl.zig");
+const zm = @import("zmath");
 
 const Input = @import("input.zig");
 
@@ -382,6 +382,8 @@ pub fn main() !void {
 
         const main_color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
             .texture = main_texture,
+            .load_op = sdl.c.SDL_GPU_LOADOP_CLEAR,
+            .store_op = sdl.c.SDL_GPU_STOREOP_STORE,
         }};
         const main_render_pass = sdl.c.SDL_BeginGPURenderPass(
             command_buffer,
@@ -460,81 +462,81 @@ pub fn main() !void {
 
 const State = struct {
     camera: Camera,
-    boxes: std.ArrayList(Box),
 
     fn init(gpa: std.mem.Allocator) !State {
-        var state = State{
+        _ = gpa;
+        return State{
             .camera = .{
-                .pos = .origin,
-                .facing = .{ .data = .{ 1.0, 0.0, 0.0, 0.0 } },
+                .pos = zm.f32x4(0.0, 0.0, 0.0, 1.0),
+                .facing = zm.f32x4(1.0, 0.0, 0.0, 0.0),
                 .yaw = 0.0,
                 .pitch = 0.0,
             },
-            .boxes = .init(gpa),
         };
-
-        try state.boxes.append(.{
-            .low = .{ .data = .{ -1, -1, -1, 1 } },
-            .high = .{ .data = .{ 1, 1, 1, 1 } },
-        });
-
-        return state;
     }
 
     fn deinit(state: *State) void {
-        state.boxes.deinit();
         state.* = undefined;
     }
 };
 
 const Camera = struct {
-    pos: math.Vec,
-    facing: math.Vec,
+    pos: zm.Vec,
+    facing: zm.Vec,
     yaw: f32,
     pitch: f32,
 
-    const up = math.Vec{ .data = .{ 0.0, 1.0, 0.0, 0.0 } };
+    const up = zm.f32x4(0.0, 1.0, 0.0, 0.0);
     const mouse_sensitivity = 0.002;
     const move_speed = 0.2;
 
     fn update(camera: *Camera, input: *Input) void {
-        camera.yaw += input.mouse_delta.y * mouse_sensitivity;
-        camera.pitch += input.mouse_delta.x * mouse_sensitivity;
+        camera.yaw += input.mouse_delta[1] * mouse_sensitivity;
+        camera.pitch += input.mouse_delta[0] * mouse_sensitivity;
         camera.pitch = std.math.clamp(camera.pitch, -0.49 * std.math.pi, 0.49 * std.math.pi);
 
-        camera.facing = math.normalize(math.Vec{ .data = .{
+        camera.facing = zm.normalize3(zm.f32x4(
             @cos(camera.pitch) * @cos(camera.yaw),
             @sin(camera.pitch),
             @cos(camera.pitch) * @sin(camera.yaw),
             0.0,
-        } });
+        ));
 
-        const forward = math.normalize(math.Vec{ .data = .{
+        const forward = zm.f32x4(
             @cos(camera.yaw),
             0.0,
             @sin(camera.yaw),
             0.0,
-        } });
+        );
 
-        const right = math.Vec{ .data = .{
+        const right = zm.f32x4(
             @cos(camera.yaw + 0.5 * std.math.pi),
             0.0,
             @sin(camera.yaw + 0.5 * std.math.pi),
             0.0,
-        } };
+        );
 
-        if (input.peek(.forward).held) camera.pos = math.add(camera.pos, forward);
-        if (input.peek(.backward).held) camera.pos = math.sub(camera.pos, forward);
-        if (input.peek(.right).held) camera.pos = math.add(camera.pos, right);
-        if (input.peek(.left).held) camera.pos = math.sub(camera.pos, right);
-        if (input.peek(.up).held) camera.pos = math.add(camera.pos, up);
-        if (input.peek(.down).held) camera.pos = math.sub(camera.pos, up);
+        if (input.peek(.forward).held) camera.pos += forward;
+        if (input.peek(.backward).held) camera.pos -= forward;
+        if (input.peek(.right).held) camera.pos += right;
+        if (input.peek(.left).held) camera.pos -= right;
+        if (input.peek(.up).held) camera.pos += up;
+        if (input.peek(.down).held) camera.pos -= up;
+    }
+
+    fn vp(camera: Camera, alpha: f32) zm.Mat {
+        // TODO we should interpolate the position
+        _ = alpha;
+        return zm.mul(
+            zm.lookAtRh(camera.position, camera.position + camera.facing, up),
+            zm.perspectiveFovRh(60.0, 4.0 / 3.0, 0.01, 100.0),
+        );
     }
 };
 
 const Box = struct {
-    low: math.Vec,
-    high: math.Vec,
+    low: zm.Vec,
+    high: zm.Vec,
 };
 
 const Vertex = extern struct {

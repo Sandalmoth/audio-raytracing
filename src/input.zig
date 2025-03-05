@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const math = @import("math.zig");
 const sdl = @import("sdl.zig");
+const zm = @import("zmath");
 
 const Input = @This();
 
@@ -9,8 +9,8 @@ const ButtonState = struct {
     held: bool = false,
     pressed: bool = false,
     released: bool = false,
-    mouse_pos_pressed: math.Vec2f = .zeros,
-    mouse_pos_released: math.Vec2f = .zeros,
+    mouse_pos_pressed: zm.Vec = zm.f32x4s(0),
+    mouse_pos_released: zm.Vec = zm.f32x4s(0),
 };
 
 const SdlInput = union(enum) {
@@ -31,15 +31,15 @@ const GameInput = enum {
 };
 
 map: std.AutoArrayHashMap(SdlInput, GameInput),
-mouse_pos: math.Vec2f,
-mouse_delta: math.Vec2f,
+mouse_pos: zm.Vec,
+mouse_delta: zm.Vec,
 states: std.EnumArray(GameInput, ButtonState),
 
 pub fn init(alloc: std.mem.Allocator) Input {
     return .{
         .map = std.AutoArrayHashMap(SdlInput, GameInput).init(alloc),
-        .mouse_pos = .zeros,
-        .mouse_delta = .zeros,
+        .mouse_pos = zm.f32x4s(0),
+        .mouse_delta = zm.f32x4s(0),
         .states = std.EnumArray(GameInput, ButtonState).initFill(.{}),
     };
 }
@@ -65,11 +65,8 @@ pub fn consume(input: *Input, game_input: GameInput) ButtonState {
 pub fn accumulate(input: *Input, event: sdl.c.SDL_Event) void {
     dispatch: switch (event.type) {
         sdl.c.SDL_EVENT_MOUSE_MOTION => {
-            input.mouse_pos = .{ .x = event.motion.x, .y = event.motion.y };
-            input.mouse_delta = math.add(
-                input.mouse_delta,
-                math.Vec2f{ .x = event.motion.xrel, .y = event.motion.yrel },
-            );
+            input.mouse_pos = .{ event.motion.x, event.motion.y, 0.0, 0.0 };
+            input.mouse_delta += zm.f32x4(event.motion.xrel, event.motion.yrel, 0.0, 0.0);
         },
         sdl.c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
             const game_input = input.map.get(
@@ -112,7 +109,7 @@ pub fn accumulate(input: *Input, event: sdl.c.SDL_Event) void {
 }
 
 pub fn decay(input: *Input) void {
-    input.mouse_delta = .{ .x = 0, .y = 0 };
+    input.mouse_delta = zm.f32x4s(0);
     var it = input.states.iterator();
     while (it.next()) |kv| {
         kv.value.pressed = false;

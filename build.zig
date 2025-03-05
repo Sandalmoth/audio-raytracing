@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
     const sdl_lib = sdl_dep.artifact("SDL3");
     // const sdl_test_lib = sdl_dep.artifact("SDL3_test");
 
+    const zmath = b.dependency("zmath", .{});
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -24,6 +26,8 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.linkLibrary(sdl_lib);
+
+    exe.root_module.addImport("zmath", zmath.module("root"));
 
     const build_shader_cmd = b.addSystemCommand(&.{ "sh", "build_shaders.sh" });
     b.getInstallStep().dependOn(&build_shader_cmd.step);
