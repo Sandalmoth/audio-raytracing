@@ -7,7 +7,7 @@ const Input = @import("input.zig");
 
 const log = std.log;
 
-pub const ticks_per_second = 43;
+pub const ticks_per_second = 89;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
 pub const tick_ns: u64 = 1000_000_000 / ticks_per_second;
 pub const max_tick_ns: u64 = @intFromFloat(0.1 * 1e9);
@@ -19,7 +19,7 @@ pub fn main() !void {
 
     sdl.c.SDL_SetMainReady();
 
-    if (!sdl.c.SDL_Init(sdl.c.SDL_INIT_VIDEO)) {
+    if (!sdl.c.SDL_Init(sdl.c.SDL_INIT_VIDEO | sdl.c.SDL_INIT_AUDIO)) {
         log.err("SDL_Init: {s}", .{sdl.c.SDL_GetError()});
         return error.Sdl;
     }
@@ -30,6 +30,11 @@ pub fn main() !void {
         return error.Sdl;
     };
     defer sdl.c.SDL_DestroyWindow(window);
+
+    if (!sdl.c.SDL_SetWindowRelativeMouseMode(window, true)) {
+        log.err("SDL_SetWindowRelativeMouseMode: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    }
 
     const gpu_device = sdl.c.SDL_CreateGPUDevice(
         sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
@@ -308,6 +313,37 @@ pub fn main() !void {
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_LCTRL }, .down);
     defer input.deinit();
 
+    var music = try Sound.init("data/sounds/space_cadet_training_montage.wav");
+    defer music.deinit();
+
+    const audio_stream = sdl.c.SDL_OpenAudioDeviceStream(
+        sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+        null,
+        null,
+        null,
+    ) orelse {
+        log.err("SDL_OpenAudioDeviceStream: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    };
+    defer sdl.c.SDL_DestroyAudioStream(audio_stream);
+
+    var audio_stream_input_format: sdl.c.SDL_AudioSpec = undefined;
+    var audio_stream_output_format: sdl.c.SDL_AudioSpec = undefined;
+    if (!sdl.c.SDL_GetAudioStreamFormat(
+        audio_stream,
+        &audio_stream_input_format,
+        &audio_stream_output_format,
+    )) {
+        log.err("SDL_GetAudioStreamFormat: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    }
+    log.debug("stream input format  {}", .{audio_stream_input_format});
+    log.debug("stream output format {}", .{audio_stream_output_format});
+    if (!sdl.c.SDL_ResumeAudioStreamDevice(audio_stream)) {
+        log.err("SDL_ResumeAudioStreamDevice: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    }
+
     var state = try State.init(gpa);
     defer state.deinit();
 
@@ -355,12 +391,12 @@ pub fn main() !void {
         @memcpy(
             bytes,
             &[_]Vertex{
-                .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 1 } },
-                .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 1 } },
-                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
+                .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
+                .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 1 } },
                 //
                 .{ .pos = .{ -0.5, -0.5, 0 }, .uv = .{ 0, 0 } },
                 .{ .pos = .{ -0.5, 0.5, 0 }, .uv = .{ 0, 1 } },
@@ -479,9 +515,11 @@ const State = struct {
         return State{
             .camera = .{
                 .pos = zm.f32x4(0.0, 0.0, 0.0, 1.0),
-                .facing = zm.f32x4(1.0, 0.0, 0.0, 0.0),
                 .yaw = 0.0,
                 .pitch = 0.0,
+                .prev_pos = zm.f32x4(0.0, 0.0, 0.0, 1.0),
+                .prev_yaw = 0.0,
+                .prev_pitch = 0.0,
             },
         };
     }
@@ -493,54 +531,65 @@ const State = struct {
 
 const Camera = struct {
     pos: zm.Vec,
-    facing: zm.Vec,
     yaw: f32,
     pitch: f32,
 
+    prev_pos: zm.Vec,
+    prev_yaw: f32,
+    prev_pitch: f32,
+
     const up = zm.f32x4(0.0, 1.0, 0.0, 0.0);
-    const mouse_sensitivity = 0.002;
-    const move_speed = 0.2;
+    const mouse_sensitivity = 0.3;
+    const move_speed = 0.5;
 
     fn update(camera: *Camera, input: *Input) void {
-        camera.yaw += input.mouse_delta[1] * mouse_sensitivity;
-        camera.pitch += input.mouse_delta[0] * mouse_sensitivity;
-        camera.pitch = std.math.clamp(camera.pitch, -0.49 * std.math.pi, 0.49 * std.math.pi);
+        camera.prev_pos = camera.pos;
+        camera.prev_yaw = camera.yaw;
+        camera.prev_pitch = camera.pitch;
 
-        camera.facing = zm.normalize3(zm.f32x4(
-            @cos(camera.pitch) * @cos(camera.yaw),
-            @sin(camera.pitch),
-            @cos(camera.pitch) * @sin(camera.yaw),
-            0.0,
-        ));
+        camera.yaw += input.mouse_delta[0] * mouse_sensitivity * tick;
+        camera.pitch -= input.mouse_delta[1] * mouse_sensitivity * tick;
+        camera.pitch = std.math.clamp(camera.pitch, -0.49 * std.math.pi, 0.49 * std.math.pi);
 
         const forward = zm.f32x4(
             @cos(camera.yaw),
             0.0,
             @sin(camera.yaw),
             0.0,
-        );
+        ) * zm.f32x4s(tick);
 
         const right = zm.f32x4(
             @cos(camera.yaw + 0.5 * std.math.pi),
             0.0,
             @sin(camera.yaw + 0.5 * std.math.pi),
             0.0,
-        );
+        ) * zm.f32x4s(tick);
 
         if (input.peek(.forward).held) camera.pos += forward;
         if (input.peek(.backward).held) camera.pos -= forward;
         if (input.peek(.right).held) camera.pos += right;
         if (input.peek(.left).held) camera.pos -= right;
-        if (input.peek(.up).held) camera.pos += up;
-        if (input.peek(.down).held) camera.pos -= up;
+        if (input.peek(.up).held) camera.pos += up * zm.f32x4s(tick);
+        if (input.peek(.down).held) camera.pos -= up * zm.f32x4s(tick);
     }
 
     fn vp(camera: Camera, alpha: f32) zm.Mat {
-        // TODO we should interpolate the position
-        _ = alpha;
+        // NOTE tbh the delay is somewhat noticable even at a higher tickrate
+        // consider using deltatime updates specifically for mouse camera
+        const pos = zm.lerp(camera.prev_pos, camera.pos, alpha);
+        const yaw = (1 - alpha) * camera.prev_yaw + alpha * camera.yaw;
+        const pitch = (1 - alpha) * camera.prev_pitch + alpha * camera.pitch;
+
+        const facing = zm.normalize3(zm.f32x4(
+            @cos(pitch) * @cos(yaw),
+            @sin(pitch),
+            @cos(pitch) * @sin(yaw),
+            0.0,
+        ));
+
         return zm.mul(
-            zm.lookAtRh(camera.pos, camera.pos + camera.facing, up),
-            zm.perspectiveFovRh(60.0, 4.0 / 3.0, 0.01, 100.0),
+            zm.lookAtRh(pos, pos + facing, up),
+            zm.perspectiveFovRh(std.math.degreesToRadians(69), 4.0 / 3.0, 0.01, 100.0),
         );
     }
 };
@@ -553,4 +602,25 @@ const Box = struct {
 const Vertex = extern struct {
     pos: [3]f32,
     uv: [2]f32,
+};
+
+const Sound = struct {
+    spec: sdl.c.SDL_AudioSpec,
+    buf: [*c]u8,
+    len: u32,
+
+    fn init(filename: [*c]const u8) !Sound {
+        var sound: Sound = undefined;
+        if (!sdl.c.SDL_LoadWAV(filename, &sound.spec, &sound.buf, &sound.len)) {
+            log.err("SDL_LoadWAV: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        }
+        log.debug("{s} format {}", .{ filename, sound.spec });
+        return sound;
+    }
+
+    fn deinit(sound: *Sound) void {
+        sdl.c.SDL_free(sound.buf);
+        sound.* = undefined;
+    }
 };
