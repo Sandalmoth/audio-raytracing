@@ -326,6 +326,10 @@ pub fn main() !void {
         return error.Sdl;
     };
     defer sdl.c.SDL_DestroyAudioStream(audio_stream);
+    if (!sdl.c.SDL_SetAudioStreamFormat(audio_stream, &Sound.spec, null)) {
+        log.err("SDL_SetAudioStreamFormat: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    }
 
     var audio_stream_input_format: sdl.c.SDL_AudioSpec = undefined;
     var audio_stream_output_format: sdl.c.SDL_AudioSpec = undefined;
@@ -373,6 +377,19 @@ pub fn main() !void {
             input.decay();
             lag -= tick_ns;
         }
+
+        // begin audio
+        const n_queued = sdl.c.SDL_GetAudioStreamQueued(audio_stream);
+        if (n_queued < 0) {
+            log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        } else if (n_queued < 4096) {
+            if (!sdl.c.SDL_PutAudioStreamData(audio_stream, music.buf, @intCast(music.len))) {
+                log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+                return error.Sdl;
+            }
+        }
+        // end audio
 
         const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));
 
@@ -605,17 +622,43 @@ const Vertex = extern struct {
 };
 
 const Sound = struct {
-    spec: sdl.c.SDL_AudioSpec,
+    const spec = sdl.c.SDL_AudioSpec{
+        .format = sdl.c.SDL_AUDIO_S16,
+        .channels = 1,
+        .freq = 44100,
+    };
     buf: [*c]u8,
     len: u32,
 
     fn init(filename: [*c]const u8) !Sound {
-        var sound: Sound = undefined;
-        if (!sdl.c.SDL_LoadWAV(filename, &sound.spec, &sound.buf, &sound.len)) {
+        // seems like a sensible design would be to preconvert all input to a known format
+        var raw_spec: sdl.c.SDL_AudioSpec = undefined;
+        var buf: [*c]u8 = null;
+        var len: u32 = 0;
+        if (!sdl.c.SDL_LoadWAV(filename, &raw_spec, &buf, &len)) {
             log.err("SDL_LoadWAV: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
         }
-        log.debug("{s} format {}", .{ filename, sound.spec });
+        defer sdl.c.SDL_free(buf);
+        log.debug("{s} format {}", .{ filename, raw_spec });
+        var sound: Sound = .{
+            .buf = null,
+            .len = 0,
+        };
+        // weird mismatch between the u32 len from load and the c_int lens in convert
+        var len2: c_int = 0;
+        if (!sdl.c.SDL_ConvertAudioSamples(
+            &raw_spec,
+            buf,
+            @intCast(len),
+            &spec,
+            &sound.buf,
+            &len2,
+        )) {
+            log.err("SDL_ConvertAudioSamples: {s}", .{sdl.c.SDL_GetError()});
+            return error.Sdl;
+        }
+        sound.len = @intCast(len2);
         return sound;
     }
 
