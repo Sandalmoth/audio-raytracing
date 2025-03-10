@@ -7,7 +7,7 @@ const Input = @import("input.zig");
 
 const log = std.log;
 
-pub const ticks_per_second = 89;
+pub const ticks_per_second = 83;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
 pub const tick_ns: u64 = 1000_000_000 / ticks_per_second;
 pub const max_tick_ns: u64 = @intFromFloat(0.1 * 1e9);
@@ -311,10 +311,14 @@ pub fn main() !void {
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_A }, .left);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_SPACE }, .up);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_LCTRL }, .down);
+    try input.map.put(.{ .mouse = sdl.c.SDL_BUTTON_LEFT }, .fire);
     defer input.deinit();
 
     var music = try Sound.init("data/sounds/space_cadet_training_montage.wav");
     defer music.deinit();
+
+    var blip = try Sound.init("data/sounds/blipSelect.wav");
+    defer blip.deinit();
 
     const audio_stream = sdl.c.SDL_OpenAudioDeviceStream(
         sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
@@ -326,7 +330,7 @@ pub fn main() !void {
         return error.Sdl;
     };
     defer sdl.c.SDL_DestroyAudioStream(audio_stream);
-    if (!sdl.c.SDL_SetAudioStreamFormat(audio_stream, &Sound.spec, null)) {
+    if (!sdl.c.SDL_SetAudioStreamFormat(audio_stream, &sound_render_spec, null)) {
         log.err("SDL_SetAudioStreamFormat: {s}", .{sdl.c.SDL_GetError()});
         return error.Sdl;
     }
@@ -348,11 +352,21 @@ pub fn main() !void {
         return error.Sdl;
     }
 
+    var frame_pool = std.heap.MemoryPool(AmbisonicFrame).init(gpa);
+    var audio_frame = try frame_pool.create();
+    audio_frame.* = .{
+        .time = 0.0,
+        .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
+        .next = null,
+    };
+    defer frame_pool.deinit();
+
     var state = try State.init(gpa);
     defer state.deinit();
 
     var frame_timer = try std.time.Timer.start();
     var lag: u64 = 0;
+    var time: f64 = 0.0;
 
     frame_timer.reset();
     main_loop: while (true) {
@@ -372,22 +386,55 @@ pub fn main() !void {
 
             // begin update
             state.camera.update(&input);
+
+            if (input.peek(.fire).pressed) {
+                try audio_frame.encode(
+                    zm.f32x4s(1.0),
+                    zm.f32x4s(0.0),
+                    time,
+                    blip.samples(),
+                    &frame_pool,
+                );
+            }
+
             // end update
 
             input.decay();
             lag -= tick_ns;
+            time += 1.0 / @as(f64, @floatFromInt(ticks_per_second));
         }
 
         // begin audio
+
         const n_queued = sdl.c.SDL_GetAudioStreamQueued(audio_stream);
         if (n_queued < 0) {
             log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
-        } else if (n_queued < 4096) {
-            if (!sdl.c.SDL_PutAudioStreamData(audio_stream, music.buf, @intCast(music.len))) {
+        } else if (n_queued < 1024) {
+            // if (!sdl.c.SDL_PutAudioStreamData(audio_stream, music.buf, @intCast(music.len))) {
+            //     log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+            //     return error.Sdl;
+            // }
+
+            if (!sdl.c.SDL_PutAudioStreamData(
+                audio_stream,
+                &audio_frame.samples[0][0],
+                AmbisonicFrame.n_samples * @sizeOf(f32),
+            )) {
                 log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
                 return error.Sdl;
             }
+            const next: *AmbisonicFrame = audio_frame.next orelse blk: {
+                audio_frame.next = try frame_pool.create();
+                audio_frame.next.?.* = .{
+                    .time = audio_frame.time + AmbisonicFrame.t_frame,
+                    .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
+                    .next = null,
+                };
+                break :blk audio_frame.next.?;
+            };
+            frame_pool.destroy(audio_frame);
+            audio_frame = next;
         }
         // end audio
 
@@ -621,12 +668,20 @@ const Vertex = extern struct {
     uv: [2]f32,
 };
 
+/// sound effects (any sound to go into the spatializer) should have this format
+const sound_effect_spec = sdl.c.SDL_AudioSpec{
+    .format = sdl.c.SDL_AUDIO_F32,
+    .channels = 1,
+    .freq = 44100,
+};
+/// the spiatializer will then output sound in this format
+const sound_render_spec = sdl.c.SDL_AudioSpec{
+    .format = sdl.c.SDL_AUDIO_F32,
+    .channels = 2,
+    .freq = 44100,
+};
+
 const Sound = struct {
-    const spec = sdl.c.SDL_AudioSpec{
-        .format = sdl.c.SDL_AUDIO_S16,
-        .channels = 1,
-        .freq = 44100,
-    };
     buf: [*c]u8,
     len: u32,
 
@@ -651,7 +706,7 @@ const Sound = struct {
             &raw_spec,
             buf,
             @intCast(len),
-            &spec,
+            &sound_effect_spec,
             &sound.buf,
             &len2,
         )) {
@@ -665,5 +720,59 @@ const Sound = struct {
     fn deinit(sound: *Sound) void {
         sdl.c.SDL_free(sound.buf);
         sound.* = undefined;
+    }
+
+    fn samples(sound: Sound) []f32 {
+        std.debug.assert(@intFromPtr(sound.buf) % 4 == 0);
+        std.debug.assert(sound.len % @sizeOf(f32) == 0);
+        const p: [*]f32 = @alignCast(@ptrCast(sound.buf));
+        return p[0 .. sound.len / @sizeOf(f32)];
+    }
+};
+
+const AmbisonicFrame = struct {
+    // linked list of frames
+    // an alternate idea could be using a ring-buffer
+    // though that would require all sounds to be streamed
+    // whereas with this, we could pre-encode a long sound right away
+    const n_samples = 1024;
+    const sample_rate = 44100.0;
+    const t_frame: f64 = @as(comptime_float, n_samples) / sample_rate;
+
+    samples: [4][n_samples]f32,
+    next: ?*AmbisonicFrame,
+    time: f64,
+
+    fn encode(
+        frame: *AmbisonicFrame,
+        source: zm.Vec,
+        listener: zm.Vec,
+        time: f64,
+        samples: []const f32,
+        pool: *std.heap.MemoryPool(AmbisonicFrame),
+    ) !void {
+        if (samples.len == 0) return;
+        std.debug.assert(time >= frame.time); // no starting sounds in the past
+        const offset: usize = @intFromFloat((time - frame.time) / sample_rate);
+        const dir = zm.normalize3(listener - source);
+        const n = @min(n_samples, offset + samples.len);
+        std.debug.print("{} {}\n", .{ offset, n });
+        for (offset..n) |i| {
+            frame.samples[0][i] += std.math.sqrt1_2 * samples[i];
+            frame.samples[1][i] += dir[0] * samples[i];
+            frame.samples[2][i] += dir[1] * samples[i];
+            frame.samples[3][i] += dir[2] * samples[i];
+        }
+
+        const next: *AmbisonicFrame = frame.next orelse blk: {
+            frame.next = try pool.create();
+            frame.next.?.* = .{
+                .time = frame.time + t_frame,
+                .samples = std.mem.zeroes([4][n_samples]f32),
+                .next = null,
+            };
+            break :blk frame.next.?;
+        };
+        try next.encode(source, listener, frame.next.?.time, samples[n..], pool);
     }
 };
