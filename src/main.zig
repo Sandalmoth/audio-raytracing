@@ -4,6 +4,7 @@ const sdl = @import("sdl.zig");
 const zm = @import("zmath");
 
 const Input = @import("input.zig");
+const SoundSystem = @import("sound_system.zig");
 
 const log = std.log;
 
@@ -368,6 +369,8 @@ pub fn main() !void {
     var lag: u64 = 0;
     var time: f64 = 0.0;
 
+    var music_cursor: usize = 0;
+
     frame_timer.reset();
     main_loop: while (true) {
         lag += @min(frame_timer.lap(), max_tick_ns);
@@ -397,50 +400,34 @@ pub fn main() !void {
                 );
             }
 
+            input.decay();
             // end update
 
-            input.decay();
             lag -= tick_ns;
             time += 1.0 / @as(f64, @floatFromInt(ticks_per_second));
         }
 
         // begin audio
-
-        const n_queued = sdl.c.SDL_GetAudioStreamQueued(audio_stream);
+        var n_queued = @divFloor(sdl.c.SDL_GetAudioStreamQueued(audio_stream), @sizeOf(f32));
         if (n_queued < 0) {
             log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
-        } else if (n_queued < 1024) {
-            // if (!sdl.c.SDL_PutAudioStreamData(audio_stream, music.buf, @intCast(music.len))) {
-            //     log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
-            //     return error.Sdl;
-            // }
-
-            if (!sdl.c.SDL_PutAudioStreamData(
-                audio_stream,
-                &audio_frame.samples[0][0],
-                AmbisonicFrame.n_samples * @sizeOf(f32),
-            )) {
+        }
+        while (n_queued < 1024) {
+            const samples = &music.samples()[music_cursor];
+            music_cursor += 128;
+            n_queued += 128;
+            if (!sdl.c.SDL_PutAudioStreamData(audio_stream, samples, 128 * @sizeOf(f32))) {
                 log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
                 return error.Sdl;
             }
-            const next: *AmbisonicFrame = audio_frame.next orelse blk: {
-                audio_frame.next = try frame_pool.create();
-                audio_frame.next.?.* = .{
-                    .time = audio_frame.time + AmbisonicFrame.t_frame,
-                    .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
-                    .next = null,
-                };
-                break :blk audio_frame.next.?;
-            };
-            frame_pool.destroy(audio_frame);
-            audio_frame = next;
         }
-        // end audio
-
-        const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));
+        std.debug.print("n_queued: {}\n", .{n_queued});
+        //end audio
 
         // begin draw
+        const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));
+
         const command_buffer = sdl.c.SDL_AcquireGPUCommandBuffer(gpu_device) orelse {
             log.err("SDL_AcquireGPUCommandBuffer: {s}", .{sdl.c.SDL_GetError()});
             return error.Sdl;
@@ -677,7 +664,7 @@ const sound_effect_spec = sdl.c.SDL_AudioSpec{
 /// the spiatializer will then output sound in this format
 const sound_render_spec = sdl.c.SDL_AudioSpec{
     .format = sdl.c.SDL_AUDIO_F32,
-    .channels = 2,
+    .channels = 1,
     .freq = 44100,
 };
 
