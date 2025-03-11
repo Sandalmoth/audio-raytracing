@@ -353,14 +353,19 @@ pub fn main() !void {
         return error.Sdl;
     }
 
-    var frame_pool = std.heap.MemoryPool(AmbisonicFrame).init(gpa);
-    var audio_frame = try frame_pool.create();
-    audio_frame.* = .{
-        .time = 0.0,
-        .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
-        .next = null,
-    };
-    defer frame_pool.deinit();
+    if (!sdl.c.SDL_SetAudioStreamGetCallback(audio_stream, audioStreamCallback, &music)) {
+        log.err("SDL_SetAudioStreamGetCallback: {s}", .{sdl.c.SDL_GetError()});
+        return error.Sdl;
+    }
+
+    // var frame_pool = std.heap.MemoryPool(AmbisonicFrame).init(gpa);
+    // var audio_frame = try frame_pool.create();
+    // audio_frame.* = .{
+    //     .time = 0.0,
+    //     .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
+    //     .next = null,
+    // };
+    // defer frame_pool.deinit();
 
     var state = try State.init(gpa);
     defer state.deinit();
@@ -369,7 +374,7 @@ pub fn main() !void {
     var lag: u64 = 0;
     var time: f64 = 0.0;
 
-    var music_cursor: usize = 0;
+    // var music_cursor: usize = 0;
 
     frame_timer.reset();
     main_loop: while (true) {
@@ -390,15 +395,15 @@ pub fn main() !void {
             // begin update
             state.camera.update(&input);
 
-            if (input.peek(.fire).pressed) {
-                try audio_frame.encode(
-                    zm.f32x4s(1.0),
-                    zm.f32x4s(0.0),
-                    time,
-                    blip.samples(),
-                    &frame_pool,
-                );
-            }
+            // if (input.peek(.fire).pressed) {
+            //     try audio_frame.encode(
+            //         zm.f32x4s(1.0),
+            //         zm.f32x4s(0.0),
+            //         time,
+            //         blip.samples(),
+            //         &frame_pool,
+            //     );
+            // }
 
             input.decay();
             // end update
@@ -408,21 +413,22 @@ pub fn main() !void {
         }
 
         // begin audio
-        var n_queued = @divFloor(sdl.c.SDL_GetAudioStreamQueued(audio_stream), @sizeOf(f32));
-        if (n_queued < 0) {
-            log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
-            return error.Sdl;
-        }
-        while (n_queued < 1024) {
-            const samples = &music.samples()[music_cursor];
-            music_cursor += 128;
-            n_queued += 128;
-            if (!sdl.c.SDL_PutAudioStreamData(audio_stream, samples, 128 * @sizeOf(f32))) {
-                log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
-                return error.Sdl;
-            }
-        }
-        std.debug.print("n_queued: {}\n", .{n_queued});
+        // var n_queued = @divFloor(sdl.c.SDL_GetAudioStreamQueued(audio_stream), @sizeOf(f32));
+        // if (n_queued < 0) {
+        //     log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
+        //     return error.Sdl;
+        // }
+        // while (n_queued < 1024) {
+        //     const samples = &music.samples()[music_cursor];
+        //     music_cursor += 128;
+        //     n_queued += 128;
+        //     if (!sdl.c.SDL_PutAudioStreamData(audio_stream, samples, 128 * @sizeOf(f32))) {
+        //         log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+        //         return error.Sdl;
+        //     }
+        // }
+        // std.debug.print("n_queued: {}\n", .{n_queued});
+        std.debug.print("{}\n", .{std.Thread.getCurrentId()});
         //end audio
 
         // begin draw
@@ -671,6 +677,7 @@ const sound_render_spec = sdl.c.SDL_AudioSpec{
 const Sound = struct {
     buf: [*c]u8,
     len: u32,
+    cursor: usize, // should be separate from resource
 
     fn init(filename: [*c]const u8) !Sound {
         // seems like a sensible design would be to preconvert all input to a known format
@@ -686,6 +693,7 @@ const Sound = struct {
         var sound: Sound = .{
             .buf = null,
             .len = 0,
+            .cursor = 0,
         };
         // weird mismatch between the u32 len from load and the c_int lens in convert
         var len2: c_int = 0;
@@ -763,3 +771,27 @@ const AmbisonicFrame = struct {
         try next.encode(source, listener, frame.next.?.time, samples[n..], pool);
     }
 };
+
+fn audioStreamCallback(
+    ctx: ?*anyopaque,
+    stream: ?*sdl.c.SDL_AudioStream,
+    additional_amount: c_int,
+    total_amount: c_int,
+) callconv(.c) void {
+    const sound = @as(?*Sound, @alignCast(@ptrCast(ctx))).?;
+    std.debug.print("{} {}\n", .{ additional_amount, total_amount });
+
+    std.debug.print("callback thread {}\n", .{std.Thread.getCurrentId()});
+    // _ = sound;
+    // _ = stream;
+    var n_samples = @divTrunc(additional_amount, @sizeOf(f32));
+    std.debug.print("n_samples {}\n", .{n_samples});
+
+    while (n_samples > 0) : (n_samples -= 128) {
+        const samples = &sound.samples()[sound.cursor];
+        sound.cursor += 128;
+        if (!sdl.c.SDL_PutAudioStreamData(stream, samples, 128 * @sizeOf(f32))) {
+            log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+        }
+    }
+}
