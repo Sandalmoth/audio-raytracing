@@ -315,48 +315,20 @@ pub fn main() !void {
     try input.map.put(.{ .mouse = sdl.c.SDL_BUTTON_LEFT }, .fire);
     defer input.deinit();
 
-    var music = try Sound.init("data/sounds/space_cadet_training_montage.wav");
-    defer music.deinit();
+    const sound_system = try SoundSystem.init(gpa);
+    defer sound_system.deinit();
 
-    var blip = try Sound.init("data/sounds/blipSelect.wav");
-    defer blip.deinit();
+    const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
+    const music_handle = try sound_system.playSound(.{ .sound = music, .repeat = true });
+    _ = music_handle;
 
-    const audio_stream = sdl.c.SDL_OpenAudioDeviceStream(
-        sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-        null,
-        null,
-        null,
-    ) orelse {
-        log.err("SDL_OpenAudioDeviceStream: {s}", .{sdl.c.SDL_GetError()});
-        return error.Sdl;
-    };
-    defer sdl.c.SDL_DestroyAudioStream(audio_stream);
-    if (!sdl.c.SDL_SetAudioStreamFormat(audio_stream, &sound_render_spec, null)) {
-        log.err("SDL_SetAudioStreamFormat: {s}", .{sdl.c.SDL_GetError()});
-        return error.Sdl;
-    }
+    const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
 
-    var audio_stream_input_format: sdl.c.SDL_AudioSpec = undefined;
-    var audio_stream_output_format: sdl.c.SDL_AudioSpec = undefined;
-    if (!sdl.c.SDL_GetAudioStreamFormat(
-        audio_stream,
-        &audio_stream_input_format,
-        &audio_stream_output_format,
-    )) {
-        log.err("SDL_GetAudioStreamFormat: {s}", .{sdl.c.SDL_GetError()});
-        return error.Sdl;
-    }
-    log.debug("stream input format  {}", .{audio_stream_input_format});
-    log.debug("stream output format {}", .{audio_stream_output_format});
-    if (!sdl.c.SDL_ResumeAudioStreamDevice(audio_stream)) {
-        log.err("SDL_ResumeAudioStreamDevice: {s}", .{sdl.c.SDL_GetError()});
-        return error.Sdl;
-    }
+    // var music = try Sound.init("data/sounds/space_cadet_training_montage.wav");
+    // defer music.deinit();
 
-    if (!sdl.c.SDL_SetAudioStreamGetCallback(audio_stream, audioStreamCallback, &music)) {
-        log.err("SDL_SetAudioStreamGetCallback: {s}", .{sdl.c.SDL_GetError()});
-        return error.Sdl;
-    }
+    // var blip = try Sound.init("data/sounds/blipSelect.wav");
+    // defer blip.deinit();
 
     // var frame_pool = std.heap.MemoryPool(AmbisonicFrame).init(gpa);
     // var audio_frame = try frame_pool.create();
@@ -395,7 +367,9 @@ pub fn main() !void {
             // begin update
             state.camera.update(&input);
 
-            // if (input.peek(.fire).pressed) {
+            if (input.peek(.fire).pressed) {
+                _ = try sound_system.playSound(.{ .sound = blip });
+            }
             //     try audio_frame.encode(
             //         zm.f32x4s(1.0),
             //         zm.f32x4s(0.0),
@@ -428,7 +402,7 @@ pub fn main() !void {
         //     }
         // }
         // std.debug.print("n_queued: {}\n", .{n_queued});
-        std.debug.print("{}\n", .{std.Thread.getCurrentId()});
+        // std.debug.print("{}\n", .{std.Thread.getCurrentId()});
         //end audio
 
         // begin draw
@@ -661,137 +635,137 @@ const Vertex = extern struct {
     uv: [2]f32,
 };
 
-/// sound effects (any sound to go into the spatializer) should have this format
-const sound_effect_spec = sdl.c.SDL_AudioSpec{
-    .format = sdl.c.SDL_AUDIO_F32,
-    .channels = 1,
-    .freq = 44100,
-};
-/// the spiatializer will then output sound in this format
-const sound_render_spec = sdl.c.SDL_AudioSpec{
-    .format = sdl.c.SDL_AUDIO_F32,
-    .channels = 1,
-    .freq = 44100,
-};
+// /// sound effects (any sound to go into the spatializer) should have this format
+// const sound_effect_spec = sdl.c.SDL_AudioSpec{
+//     .format = sdl.c.SDL_AUDIO_F32,
+//     .channels = 1,
+//     .freq = 44100,
+// };
+// /// the spiatializer will then output sound in this format
+// const sound_render_spec = sdl.c.SDL_AudioSpec{
+//     .format = sdl.c.SDL_AUDIO_F32,
+//     .channels = 1,
+//     .freq = 44100,
+// };
 
-const Sound = struct {
-    buf: [*c]u8,
-    len: u32,
-    cursor: usize, // should be separate from resource
+// const Sound = struct {
+//     buf: [*c]u8,
+//     len: u32,
+//     cursor: usize, // should be separate from resource
 
-    fn init(filename: [*c]const u8) !Sound {
-        // seems like a sensible design would be to preconvert all input to a known format
-        var raw_spec: sdl.c.SDL_AudioSpec = undefined;
-        var buf: [*c]u8 = null;
-        var len: u32 = 0;
-        if (!sdl.c.SDL_LoadWAV(filename, &raw_spec, &buf, &len)) {
-            log.err("SDL_LoadWAV: {s}", .{sdl.c.SDL_GetError()});
-            return error.Sdl;
-        }
-        defer sdl.c.SDL_free(buf);
-        log.debug("{s} format {}", .{ filename, raw_spec });
-        var sound: Sound = .{
-            .buf = null,
-            .len = 0,
-            .cursor = 0,
-        };
-        // weird mismatch between the u32 len from load and the c_int lens in convert
-        var len2: c_int = 0;
-        if (!sdl.c.SDL_ConvertAudioSamples(
-            &raw_spec,
-            buf,
-            @intCast(len),
-            &sound_effect_spec,
-            &sound.buf,
-            &len2,
-        )) {
-            log.err("SDL_ConvertAudioSamples: {s}", .{sdl.c.SDL_GetError()});
-            return error.Sdl;
-        }
-        sound.len = @intCast(len2);
-        return sound;
-    }
+//     fn init(filename: [*c]const u8) !Sound {
+//         // seems like a sensible design would be to preconvert all input to a known format
+//         var raw_spec: sdl.c.SDL_AudioSpec = undefined;
+//         var buf: [*c]u8 = null;
+//         var len: u32 = 0;
+//         if (!sdl.c.SDL_LoadWAV(filename, &raw_spec, &buf, &len)) {
+//             log.err("SDL_LoadWAV: {s}", .{sdl.c.SDL_GetError()});
+//             return error.Sdl;
+//         }
+//         defer sdl.c.SDL_free(buf);
+//         log.debug("{s} format {}", .{ filename, raw_spec });
+//         var sound: Sound = .{
+//             .buf = null,
+//             .len = 0,
+//             .cursor = 0,
+//         };
+//         // weird mismatch between the u32 len from load and the c_int lens in convert
+//         var len2: c_int = 0;
+//         if (!sdl.c.SDL_ConvertAudioSamples(
+//             &raw_spec,
+//             buf,
+//             @intCast(len),
+//             &sound_effect_spec,
+//             &sound.buf,
+//             &len2,
+//         )) {
+//             log.err("SDL_ConvertAudioSamples: {s}", .{sdl.c.SDL_GetError()});
+//             return error.Sdl;
+//         }
+//         sound.len = @intCast(len2);
+//         return sound;
+//     }
 
-    fn deinit(sound: *Sound) void {
-        sdl.c.SDL_free(sound.buf);
-        sound.* = undefined;
-    }
+//     fn deinit(sound: *Sound) void {
+//         sdl.c.SDL_free(sound.buf);
+//         sound.* = undefined;
+//     }
 
-    fn samples(sound: Sound) []f32 {
-        std.debug.assert(@intFromPtr(sound.buf) % 4 == 0);
-        std.debug.assert(sound.len % @sizeOf(f32) == 0);
-        const p: [*]f32 = @alignCast(@ptrCast(sound.buf));
-        return p[0 .. sound.len / @sizeOf(f32)];
-    }
-};
+//     fn samples(sound: Sound) []f32 {
+//         std.debug.assert(@intFromPtr(sound.buf) % 4 == 0);
+//         std.debug.assert(sound.len % @sizeOf(f32) == 0);
+//         const p: [*]f32 = @alignCast(@ptrCast(sound.buf));
+//         return p[0 .. sound.len / @sizeOf(f32)];
+//     }
+// };
 
-const AmbisonicFrame = struct {
-    // linked list of frames
-    // an alternate idea could be using a ring-buffer
-    // though that would require all sounds to be streamed
-    // whereas with this, we could pre-encode a long sound right away
-    const n_samples = 1024;
-    const sample_rate = 44100.0;
-    const t_frame: f64 = @as(comptime_float, n_samples) / sample_rate;
+// const AmbisonicFrame = struct {
+//     // linked list of frames
+//     // an alternate idea could be using a ring-buffer
+//     // though that would require all sounds to be streamed
+//     // whereas with this, we could pre-encode a long sound right away
+//     const n_samples = 1024;
+//     const sample_rate = 44100.0;
+//     const t_frame: f64 = @as(comptime_float, n_samples) / sample_rate;
 
-    samples: [4][n_samples]f32,
-    next: ?*AmbisonicFrame,
-    time: f64,
+//     samples: [4][n_samples]f32,
+//     next: ?*AmbisonicFrame,
+//     time: f64,
 
-    fn encode(
-        frame: *AmbisonicFrame,
-        source: zm.Vec,
-        listener: zm.Vec,
-        time: f64,
-        samples: []const f32,
-        pool: *std.heap.MemoryPool(AmbisonicFrame),
-    ) !void {
-        if (samples.len == 0) return;
-        std.debug.assert(time >= frame.time); // no starting sounds in the past
-        const offset: usize = @intFromFloat((time - frame.time) / sample_rate);
-        const dir = zm.normalize3(listener - source);
-        const n = @min(n_samples, offset + samples.len);
-        std.debug.print("{} {}\n", .{ offset, n });
-        for (offset..n) |i| {
-            frame.samples[0][i] += std.math.sqrt1_2 * samples[i];
-            frame.samples[1][i] += dir[0] * samples[i];
-            frame.samples[2][i] += dir[1] * samples[i];
-            frame.samples[3][i] += dir[2] * samples[i];
-        }
+//     fn encode(
+//         frame: *AmbisonicFrame,
+//         source: zm.Vec,
+//         listener: zm.Vec,
+//         time: f64,
+//         samples: []const f32,
+//         pool: *std.heap.MemoryPool(AmbisonicFrame),
+//     ) !void {
+//         if (samples.len == 0) return;
+//         std.debug.assert(time >= frame.time); // no starting sounds in the past
+//         const offset: usize = @intFromFloat((time - frame.time) / sample_rate);
+//         const dir = zm.normalize3(listener - source);
+//         const n = @min(n_samples, offset + samples.len);
+//         std.debug.print("{} {}\n", .{ offset, n });
+//         for (offset..n) |i| {
+//             frame.samples[0][i] += std.math.sqrt1_2 * samples[i];
+//             frame.samples[1][i] += dir[0] * samples[i];
+//             frame.samples[2][i] += dir[1] * samples[i];
+//             frame.samples[3][i] += dir[2] * samples[i];
+//         }
 
-        const next: *AmbisonicFrame = frame.next orelse blk: {
-            frame.next = try pool.create();
-            frame.next.?.* = .{
-                .time = frame.time + t_frame,
-                .samples = std.mem.zeroes([4][n_samples]f32),
-                .next = null,
-            };
-            break :blk frame.next.?;
-        };
-        try next.encode(source, listener, frame.next.?.time, samples[n..], pool);
-    }
-};
+//         const next: *AmbisonicFrame = frame.next orelse blk: {
+//             frame.next = try pool.create();
+//             frame.next.?.* = .{
+//                 .time = frame.time + t_frame,
+//                 .samples = std.mem.zeroes([4][n_samples]f32),
+//                 .next = null,
+//             };
+//             break :blk frame.next.?;
+//         };
+//         try next.encode(source, listener, frame.next.?.time, samples[n..], pool);
+//     }
+// };
 
-fn audioStreamCallback(
-    ctx: ?*anyopaque,
-    stream: ?*sdl.c.SDL_AudioStream,
-    additional_amount: c_int,
-    total_amount: c_int,
-) callconv(.c) void {
-    const sound = @as(?*Sound, @alignCast(@ptrCast(ctx))).?;
-    std.debug.print("{} {}\n", .{ additional_amount, total_amount });
+// fn audioStreamCallback(
+//     ctx: ?*anyopaque,
+//     stream: ?*sdl.c.SDL_AudioStream,
+//     additional_amount: c_int,
+//     total_amount: c_int,
+// ) callconv(.c) void {
+//     const sound = @as(?*Sound, @alignCast(@ptrCast(ctx))).?;
+//     std.debug.print("{} {}\n", .{ additional_amount, total_amount });
 
-    std.debug.print("callback thread {}\n", .{std.Thread.getCurrentId()});
-    // _ = sound;
-    // _ = stream;
-    var n_samples = @divTrunc(additional_amount, @sizeOf(f32));
-    std.debug.print("n_samples {}\n", .{n_samples});
+//     std.debug.print("callback thread {}\n", .{std.Thread.getCurrentId()});
+//     // _ = sound;
+//     // _ = stream;
+//     var n_samples = @divTrunc(additional_amount, @sizeOf(f32));
+//     std.debug.print("n_samples {}\n", .{n_samples});
 
-    while (n_samples > 0) : (n_samples -= 128) {
-        const samples = &sound.samples()[sound.cursor];
-        sound.cursor += 128;
-        if (!sdl.c.SDL_PutAudioStreamData(stream, samples, 128 * @sizeOf(f32))) {
-            log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
-        }
-    }
-}
+//     while (n_samples > 0) : (n_samples -= 128) {
+//         const samples = &sound.samples()[sound.cursor];
+//         sound.cursor += 128;
+//         if (!sdl.c.SDL_PutAudioStreamData(stream, samples, 128 * @sizeOf(f32))) {
+//             log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+//         }
+//     }
+// }
