@@ -20,6 +20,15 @@ const sound_render_spec = sdl.c.SDL_AudioSpec{
     .freq = 44100,
 };
 
+const hrtf: struct {
+    min_elevation: f32,
+    max_elevation: f32,
+    min_azimuth: f32,
+    max_azimuth: f32,
+    irs_l: []const []const []const f32,
+    irs_r: []const []const []const f32,
+} = @import("hrtf.zon");
+
 const frame_size = 128;
 
 gpa: std.mem.Allocator,
@@ -112,28 +121,6 @@ fn callback(
     _ = total_amount;
 
     while (n_samples > 0) : (n_samples -= 128) {
-        // var buf = std.mem.zeroes([256]f32);
-        // var it = system.playing.iterator();
-        // while (it.next()) |kv| {
-        //     const p = kv.value_ptr;
-        //     const s = system.sounds.items[p.sound];
-        //     const samples = s.samples();
-        //     if (p.repeat) {
-        //         for (0..128) |i| {
-        //             buf[2 * i] += samples[(p.cursor + i) % samples.len];
-        //             buf[2 * i + 1] += samples[(p.cursor + i) % samples.len];
-        //         }
-        //         p.cursor += 128;
-        //     } else {
-        //         const end = @min(p.cursor + 128, samples.len);
-        //         for (p.cursor..end) |i| {
-        //             buf[2 * (i - p.cursor)] += samples[i];
-        //             buf[2 * (i - p.cursor) + 1] += samples[i];
-        //         }
-        //         p.cursor = end;
-        //         if (p.cursor == samples.len) p.finished = true;
-        //     }
-        // }
         const ambisonic = system.buildAmbisonic();
         const stereo = system.ambisonicToStereo(ambisonic);
         if (!sdl.c.SDL_PutAudioStreamData(stream, &stereo[0], 2 * frame_size * @sizeOf(f32))) {
