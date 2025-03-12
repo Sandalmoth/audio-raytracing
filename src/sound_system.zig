@@ -21,10 +21,8 @@ const sound_render_spec = sdl.c.SDL_AudioSpec{
 };
 
 const hrtf: struct {
-    min_elevation: f32,
-    max_elevation: f32,
-    min_azimuth: f32,
-    max_azimuth: f32,
+    elevation_resolution: f32,
+    azimuth_resolution: f32,
     irs_l: []const []const []const f32,
     irs_r: []const []const []const f32,
 } = @import("hrtf.zon");
@@ -186,11 +184,53 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
 fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) [frame_size][2]f32 {
     _ = system;
     var buf: [frame_size][2]f32 = undefined;
+
+    for ([_][2]f32{
+        .{ 0.0 * std.math.pi, 0.0 },
+        .{ 0.5 * std.math.pi, 0.0 },
+        .{ 1.0 * std.math.pi, 0.0 },
+        .{ 1.5 * std.math.pi, 0.0 },
+        .{ 0.0, -0.5 * std.math.pi },
+        .{ 0.0, 0.5 * std.math.pi },
+        .{ 0.25 * std.math.pi, 0.25 * std.math.pi },
+        .{ 0.75 * std.math.pi, 0.25 * std.math.pi },
+        .{ 1.25 * std.math.pi, 0.25 * std.math.pi },
+        .{ 1.75 * std.math.pi, 0.25 * std.math.pi },
+        .{ 0.25 * std.math.pi, -0.25 * std.math.pi },
+        .{ 0.75 * std.math.pi, -0.25 * std.math.pi },
+        .{ 1.25 * std.math.pi, -0.25 * std.math.pi },
+        .{ 1.75 * std.math.pi, -0.25 * std.math.pi },
+    }) |ae| {
+        const azim, const elev = ae;
+        const irs = getHrtfIr(azim, elev);
+        _ = irs;
+    }
+
     for (&ambisonic[0], 0..) |sample, i| {
         buf[i][0] = sample;
         buf[i][1] = sample;
     }
+
     return buf;
+}
+
+fn getHrtfIr(azimuth: f32, elevation: f32) [2][]const f32 {
+    std.debug.assert(azimuth >= 0);
+    std.debug.assert(azimuth <= std.math.tau);
+    std.debug.assert(elevation >= -0.5 * std.math.pi);
+    std.debug.assert(elevation <= 0.5 * std.math.pi);
+
+    const ix_azim = @as(usize, @intFromFloat(@round(
+        azimuth / std.math.tau * @as(f32, @floatFromInt(hrtf.irs_l[0].len)),
+    ))) % hrtf.irs_l[0].len;
+    const ix_elev = @as(usize, @intFromFloat(@round(
+        (elevation + 0.5 * std.math.pi) / std.math.pi * @as(f32, @floatFromInt(hrtf.irs_l.len)),
+    ))) % hrtf.irs_l.len;
+
+    return .{
+        hrtf.irs_l[ix_elev][ix_azim],
+        hrtf.irs_r[ix_elev][ix_azim],
+    };
 }
 
 const Playing = struct {
