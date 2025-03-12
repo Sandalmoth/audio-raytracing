@@ -319,25 +319,12 @@ pub fn main() !void {
     defer sound_system.deinit();
 
     const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
-    const music_handle = try sound_system.playSound(.{ .sound = music, .repeat = true });
+    const music_handle = try sound_system.playSound(
+        .{ .sound = music, .pos = zm.f32x4s(0.0), .repeat = true },
+    );
     _ = music_handle;
 
     const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
-
-    // var music = try Sound.init("data/sounds/space_cadet_training_montage.wav");
-    // defer music.deinit();
-
-    // var blip = try Sound.init("data/sounds/blipSelect.wav");
-    // defer blip.deinit();
-
-    // var frame_pool = std.heap.MemoryPool(AmbisonicFrame).init(gpa);
-    // var audio_frame = try frame_pool.create();
-    // audio_frame.* = .{
-    //     .time = 0.0,
-    //     .samples = std.mem.zeroes([4][AmbisonicFrame.n_samples]f32),
-    //     .next = null,
-    // };
-    // defer frame_pool.deinit();
 
     var state = try State.init(gpa);
     defer state.deinit();
@@ -345,8 +332,6 @@ pub fn main() !void {
     var frame_timer = try std.time.Timer.start();
     var lag: u64 = 0;
     var time: f64 = 0.0;
-
-    // var music_cursor: usize = 0;
 
     frame_timer.reset();
     main_loop: while (true) {
@@ -368,16 +353,8 @@ pub fn main() !void {
             state.camera.update(&input);
 
             if (input.peek(.fire).pressed) {
-                _ = try sound_system.playSound(.{ .sound = blip });
+                _ = try sound_system.playSound(.{ .sound = blip, .pos = zm.f32x4s(0.0) });
             }
-            //     try audio_frame.encode(
-            //         zm.f32x4s(1.0),
-            //         zm.f32x4s(0.0),
-            //         time,
-            //         blip.samples(),
-            //         &frame_pool,
-            //     );
-            // }
 
             input.decay();
             // end update
@@ -385,25 +362,6 @@ pub fn main() !void {
             lag -= tick_ns;
             time += 1.0 / @as(f64, @floatFromInt(ticks_per_second));
         }
-
-        // begin audio
-        // var n_queued = @divFloor(sdl.c.SDL_GetAudioStreamQueued(audio_stream), @sizeOf(f32));
-        // if (n_queued < 0) {
-        //     log.err("SDL_GetAudioStreamQueued: {s}", .{sdl.c.SDL_GetError()});
-        //     return error.Sdl;
-        // }
-        // while (n_queued < 1024) {
-        //     const samples = &music.samples()[music_cursor];
-        //     music_cursor += 128;
-        //     n_queued += 128;
-        //     if (!sdl.c.SDL_PutAudioStreamData(audio_stream, samples, 128 * @sizeOf(f32))) {
-        //         log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
-        //         return error.Sdl;
-        //     }
-        // }
-        // std.debug.print("n_queued: {}\n", .{n_queued});
-        // std.debug.print("{}\n", .{std.Thread.getCurrentId()});
-        //end audio
 
         // begin draw
         const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));

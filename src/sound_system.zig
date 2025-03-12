@@ -20,11 +20,14 @@ const sound_render_spec = sdl.c.SDL_AudioSpec{
     .freq = 44100,
 };
 
+const frame_size = 128;
+
 gpa: std.mem.Allocator,
 sounds: std.ArrayListUnmanaged(Sound),
 playing: std.AutoArrayHashMapUnmanaged(usize, Playing),
 playing_counter: usize,
 stream: *sdl.c.SDL_AudioStream,
+listener: zm.Vec,
 
 pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     const system = try gpa.create(SoundSystem);
@@ -34,6 +37,7 @@ pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     system.sounds = .empty;
     system.playing = .empty;
     system.playing_counter = 0;
+    system.listener = zm.f32x4s(0.0);
     system.stream = sdl.c.SDL_OpenAudioDeviceStream(
         sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
         null,
@@ -108,29 +112,31 @@ fn callback(
     _ = total_amount;
 
     while (n_samples > 0) : (n_samples -= 128) {
-        var buf = std.mem.zeroes([256]f32);
-        var it = system.playing.iterator();
-        while (it.next()) |kv| {
-            const p = kv.value_ptr;
-            const s = system.sounds.items[p.sound];
-            const samples = s.samples();
-            if (p.repeat) {
-                for (0..128) |i| {
-                    buf[2 * i] += samples[(p.cursor + i) % samples.len];
-                    buf[2 * i + 1] += samples[(p.cursor + i) % samples.len];
-                }
-                p.cursor += 128;
-            } else {
-                const end = @min(p.cursor + 128, samples.len);
-                for (p.cursor..end) |i| {
-                    buf[2 * (i - p.cursor)] += samples[i];
-                    buf[2 * (i - p.cursor) + 1] += samples[i];
-                }
-                p.cursor = end;
-                if (p.cursor == samples.len) p.finished = true;
-            }
-        }
-        if (!sdl.c.SDL_PutAudioStreamData(stream, &buf[0], 256 * @sizeOf(f32))) {
+        // var buf = std.mem.zeroes([256]f32);
+        // var it = system.playing.iterator();
+        // while (it.next()) |kv| {
+        //     const p = kv.value_ptr;
+        //     const s = system.sounds.items[p.sound];
+        //     const samples = s.samples();
+        //     if (p.repeat) {
+        //         for (0..128) |i| {
+        //             buf[2 * i] += samples[(p.cursor + i) % samples.len];
+        //             buf[2 * i + 1] += samples[(p.cursor + i) % samples.len];
+        //         }
+        //         p.cursor += 128;
+        //     } else {
+        //         const end = @min(p.cursor + 128, samples.len);
+        //         for (p.cursor..end) |i| {
+        //             buf[2 * (i - p.cursor)] += samples[i];
+        //             buf[2 * (i - p.cursor) + 1] += samples[i];
+        //         }
+        //         p.cursor = end;
+        //         if (p.cursor == samples.len) p.finished = true;
+        //     }
+        // }
+        const ambisonic = system.buildAmbisonic();
+        const stereo = system.ambisonicToStereo(ambisonic);
+        if (!sdl.c.SDL_PutAudioStreamData(stream, &stereo[0], 2 * frame_size * @sizeOf(f32))) {
             log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
         }
     }
@@ -145,8 +151,64 @@ fn callback(
     }
 }
 
+fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
+    var buf = std.mem.zeroes([4][frame_size]f32);
+    var it = system.playing.iterator();
+    while (it.next()) |kv| {
+        const p = kv.value_ptr;
+        // ambisonic components
+        const w: f32, const x: f32, const y: f32, const z: f32 = blk: {
+            // if distance is below threshold, smoothly scale to 0 directional component
+            const dir = system.listener - p.pos;
+            const len = zm.length3(dir)[0];
+            if (len < 1e-9) break :blk .{ std.math.sqrt1_2, 0.0, 0.0, 0.0 };
+            const ndir = zm.normalize3(dir);
+            const t = 0.1;
+            if (len < t) {
+                const d = ndir * zm.splat(zm.F32x4, len / t);
+                break :blk .{ std.math.sqrt1_2, d[0], d[1], d[2] };
+            } else {
+                break :blk .{ std.math.sqrt1_2, ndir[0], ndir[1], ndir[2] };
+            }
+        };
+        const s = system.sounds.items[p.sound];
+        const samples = s.samples();
+        if (p.repeat) {
+            for (0..128) |i| {
+                buf[0][i] += w * samples[(p.cursor + i) % samples.len];
+                buf[1][i] += x * samples[(p.cursor + i) % samples.len];
+                buf[2][i] += y * samples[(p.cursor + i) % samples.len];
+                buf[3][i] += z * samples[(p.cursor + i) % samples.len];
+            }
+            p.cursor += 128;
+        } else {
+            const end = @min(p.cursor + 128, samples.len);
+            for (p.cursor..end) |i| {
+                buf[0][i - p.cursor] += w * samples[i];
+                buf[1][i - p.cursor] += x * samples[i];
+                buf[2][i - p.cursor] += y * samples[i];
+                buf[3][i - p.cursor] += z * samples[i];
+            }
+            p.cursor = end;
+            if (p.cursor == samples.len) p.finished = true;
+        }
+    }
+    return buf;
+}
+
+fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) [frame_size][2]f32 {
+    _ = system;
+    var buf: [frame_size][2]f32 = undefined;
+    for (&ambisonic[0], 0..) |sample, i| {
+        buf[i][0] = sample;
+        buf[i][1] = sample;
+    }
+    return buf;
+}
+
 const Playing = struct {
     sound: usize, // should be a type safe id in a proper implementation
+    pos: zm.Vec,
     cursor: usize = 0,
     repeat: bool = false,
     finished: bool = false,
