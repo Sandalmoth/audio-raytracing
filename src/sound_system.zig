@@ -35,6 +35,7 @@ playing: std.AutoArrayHashMapUnmanaged(usize, Playing),
 playing_counter: usize,
 stream: *sdl.c.SDL_AudioStream,
 listener: zm.Vec,
+stereo_frame_buffer: [2 * frame_size][2]f32,
 
 pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     const system = try gpa.create(SoundSystem);
@@ -45,6 +46,7 @@ pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     system.playing = .empty;
     system.playing_counter = 0;
     system.listener = zm.f32x4s(0.0);
+    system.stereo_frame_buffer = std.mem.zeroes([2 * frame_size][2]f32);
     system.stream = sdl.c.SDL_OpenAudioDeviceStream(
         sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
         null,
@@ -114,15 +116,26 @@ fn callback(
     additional_amount: c_int,
     total_amount: c_int,
 ) callconv(.c) void {
+    // var t = std.time.Timer.start() catch unreachable;
+    // defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     var n_samples = @divTrunc(additional_amount, 2 * @sizeOf(f32));
     _ = total_amount;
 
     while (n_samples > 0) : (n_samples -= 128) {
         const ambisonic = system.buildAmbisonic();
-        const stereo = system.ambisonicToStereo(ambisonic);
-        if (!sdl.c.SDL_PutAudioStreamData(stream, &stereo[0], 2 * frame_size * @sizeOf(f32))) {
+        system.ambisonicToStereo(ambisonic);
+        if (!sdl.c.SDL_PutAudioStreamData(
+            stream,
+            &system.stereo_frame_buffer[0],
+            2 * frame_size * @sizeOf(f32),
+        )) {
             log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
+        }
+
+        for (0..frame_size) |i| {
+            system.stereo_frame_buffer[i] = system.stereo_frame_buffer[2 * i];
+            system.stereo_frame_buffer[2 * i] = .{ 0.0, 0.0 };
         }
     }
 
@@ -181,10 +194,9 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
     return buf;
 }
 
-fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) [frame_size][2]f32 {
-    _ = system;
-    var buf: [frame_size][2]f32 = undefined;
-
+fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) void {
+    const scale = 1.0 / 14.0;
+    var conv_bufs: [2][2 * frame_size]f32 = undefined;
     for ([_][2]f32{
         .{ 0.0 * std.math.pi, 0.0 },
         .{ 0.5 * std.math.pi, 0.0 },
@@ -203,16 +215,52 @@ fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) [frame
     }) |ae| {
         const azim, const elev = ae;
         const irs = getHrtfIr(azim, elev);
-        _ = irs;
+        convolve(&ambisonic[0], irs[0], &conv_bufs[0]);
+        convolve(&ambisonic[0], irs[1], &conv_bufs[1]);
+
+        for (0..frame_size) |i| {
+            system.stereo_frame_buffer[i][0] += conv_bufs[0][i] * scale;
+            system.stereo_frame_buffer[i][1] += conv_bufs[1][i] * scale;
+            system.stereo_frame_buffer[i + frame_size][0] = conv_bufs[0][i + frame_size] * scale;
+            system.stereo_frame_buffer[i + frame_size][1] = conv_bufs[1][i + frame_size] * scale;
+        }
     }
 
-    for (&ambisonic[0], 0..) |sample, i| {
-        buf[i][0] = sample;
-        buf[i][1] = sample;
-    }
-
-    return buf;
+    // for (&ambisonic[0], 0..) |sample, i| {
+    //     system.stereo_frame_buffer[i][0] = sample;
+    //     system.stereo_frame_buffer[i][1] = sample;
+    // }
 }
+
+// class HRTFStreamProcessor:
+//     def __init__(self, hrtf_data, frame_size=256):
+//         self.hrtf_data = hrtf_data
+//         self.frame_size = frame_size
+//         self.input_buffer = np.zeros(frame_size * 2)  # Buffer for overlap-add
+//         self.output_buffer = np.zeros(frame_size * 2)  # Buffer for overlap-add
+
+//     def process_frame(self, mono_frame, azimuth, elevation):
+//         # Apply distance attenuation (if needed)
+//         # mono_frame = apply_distance_attenuation(mono_frame, distance)
+
+//         # Get the HRTF for the current direction
+//         hrtf_left, hrtf_right = interpolate_hrtf(azimuth, elevation, self.hrtf_data)
+
+//         # Convolve the frame with the HRTF using overlap-add
+//         padded_frame = np.concatenate([mono_frame, np.zeros(len(hrtf_left) - 1)])
+//         spatialized_left = convolve(padded_frame, hrtf_left, mode='valid')
+//         spatialized_right = convolve(padded_frame, hrtf_right, mode='valid')
+
+//         # Overlap-add to handle streaming
+//         self.output_buffer[:self.frame_size] += spatialized_left[:self.frame_size]
+//         self.output_buffer[self.frame_size:] = spatialized_left[self.frame_size:]
+
+//         # Output the current frame
+//         output_frame = self.output_buffer[:self.frame_size]
+//         self.output_buffer = np.roll(self.output_buffer, -self.frame_size)
+//         self.output_buffer[-self.frame_size:] = 0  # Clear the end for next frame
+
+//         return output_frame
 
 fn getHrtfIr(azimuth: f32, elevation: f32) [2][]const f32 {
     std.debug.assert(azimuth >= 0);
@@ -231,6 +279,16 @@ fn getHrtfIr(azimuth: f32, elevation: f32) [2][]const f32 {
         hrtf.irs_l[ix_elev][ix_azim],
         hrtf.irs_r[ix_elev][ix_azim],
     };
+}
+
+fn convolve(input: []const f32, ir: []const f32, output: []f32) void {
+    std.debug.assert(output.len >= input.len + ir.len - 1);
+    for (0..output.len) |i| output[i] = 0.0;
+    for (0..input.len) |i| {
+        for (0..ir.len) |j| {
+            output[i + j] += input[i] * ir[j];
+        }
+    }
 }
 
 const Playing = struct {
