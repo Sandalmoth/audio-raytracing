@@ -134,8 +134,8 @@ fn callback(
         }
 
         for (0..frame_size) |i| {
-            system.stereo_frame_buffer[i] = system.stereo_frame_buffer[2 * i];
-            system.stereo_frame_buffer[2 * i] = .{ 0.0, 0.0 };
+            system.stereo_frame_buffer[i] = system.stereo_frame_buffer[i + frame_size];
+            system.stereo_frame_buffer[i + frame_size] = .{ 0.0, 0.0 };
         }
     }
 
@@ -194,29 +194,38 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
     return buf;
 }
 
+const identity_ir = blk: {
+    var ir = std.mem.zeroes([frame_size]f32);
+    ir[0] = 1.0;
+    break :blk ir;
+};
+
 fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) void {
-    const scale = 1.0 / 14.0;
+    const scale = 1.0 / 4.0;
     var conv_bufs: [2][2 * frame_size]f32 = undefined;
     for ([_][2]f32{
         .{ 0.0 * std.math.pi, 0.0 },
-        .{ 0.5 * std.math.pi, 0.0 },
+        // .{ 0.5 * std.math.pi, 0.0 },
         .{ 1.0 * std.math.pi, 0.0 },
-        .{ 1.5 * std.math.pi, 0.0 },
-        .{ 0.0, -0.5 * std.math.pi },
-        .{ 0.0, 0.5 * std.math.pi },
-        .{ 0.25 * std.math.pi, 0.25 * std.math.pi },
-        .{ 0.75 * std.math.pi, 0.25 * std.math.pi },
-        .{ 1.25 * std.math.pi, 0.25 * std.math.pi },
-        .{ 1.75 * std.math.pi, 0.25 * std.math.pi },
-        .{ 0.25 * std.math.pi, -0.25 * std.math.pi },
-        .{ 0.75 * std.math.pi, -0.25 * std.math.pi },
-        .{ 1.25 * std.math.pi, -0.25 * std.math.pi },
-        .{ 1.75 * std.math.pi, -0.25 * std.math.pi },
+        // .{ 1.5 * std.math.pi, 0.0 },
+        // .{ 0.0, -0.5 * std.math.pi },
+        // .{ 0.0, 0.5 * std.math.pi },
+        // .{ 0.25 * std.math.pi, 0.25 * std.math.pi },
+        // .{ 0.75 * std.math.pi, 0.25 * std.math.pi },
+        // .{ 1.25 * std.math.pi, 0.25 * std.math.pi },
+        // .{ 1.75 * std.math.pi, 0.25 * std.math.pi },
+        // .{ 0.25 * std.math.pi, -0.25 * std.math.pi },
+        // .{ 0.75 * std.math.pi, -0.25 * std.math.pi },
+        // .{ 1.25 * std.math.pi, -0.25 * std.math.pi },
+        // .{ 1.75 * std.math.pi, -0.25 * std.math.pi },
     }) |ae| {
         const azim, const elev = ae;
         const irs = getHrtfIr(azim, elev);
         convolve(&ambisonic[0], irs[0], &conv_bufs[0]);
         convolve(&ambisonic[0], irs[1], &conv_bufs[1]);
+        // _ = irs;
+        // convolve(&ambisonic[0], &identity_ir, &conv_bufs[0]);
+        // convolve(&ambisonic[0], &identity_ir, &conv_bufs[1]);
 
         for (0..frame_size) |i| {
             system.stereo_frame_buffer[i][0] += conv_bufs[0][i] * scale;
