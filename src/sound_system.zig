@@ -33,7 +33,9 @@ playing: std.AutoArrayHashMapUnmanaged(usize, Playing),
 playing_counter: usize,
 stream: *sdl.c.SDL_AudioStream,
 listener: zm.Vec,
+orientation: zm.Quat,
 stereo_frame_buffer: [2 * frame_size][2]f32,
+mutex: std.Thread.Mutex,
 
 pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     const system = try gpa.create(SoundSystem);
@@ -44,7 +46,9 @@ pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     system.playing = .empty;
     system.playing_counter = 0;
     system.listener = zm.f32x4s(0.0);
+    system.orientation = zm.qidentity();
     system.stereo_frame_buffer = std.mem.zeroes([2 * frame_size][2]f32);
+    system.mutex = .{};
     system.stream = sdl.c.SDL_OpenAudioDeviceStream(
         sdl.c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
         null,
@@ -117,11 +121,15 @@ fn callback(
     // var t = std.time.Timer.start() catch unreachable;
     // defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
+    system.mutex.lock();
+    defer system.mutex.unlock();
+
     var n_samples = @divTrunc(additional_amount, 2 * @sizeOf(f32));
     _ = total_amount;
 
     while (n_samples > 0) : (n_samples -= 128) {
-        const ambisonic = system.buildAmbisonic();
+        var ambisonic = system.buildAmbisonic();
+        system.rotateAmbisonic(&ambisonic);
         system.ambisonicToStereo(ambisonic);
         if (!sdl.c.SDL_PutAudioStreamData(
             stream,
@@ -160,7 +168,7 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
             // +x -> front
             // +y -> up
             // +z -> right
-            const dir = system.listener - p.pos;
+            const dir = p.pos - system.listener; // from listener towards source
             const len = zm.length3(dir)[0];
             const t: f32 = 0.1;
             const norm = if (len < 1e-6)
@@ -181,7 +189,7 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
         if (p.repeat) {
             for (0..128) |i| {
                 for (0..4) |j| {
-                    buf[j][i] += sh[j] * samples[(p.cursor + i) % samples.len];
+                    buf[j][i] += sh[j] * samples[(p.cursor + i) % samples.len] * p.gain;
                 }
             }
             p.cursor += 128;
@@ -189,7 +197,7 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
             const end = @min(p.cursor + 128, samples.len);
             for (p.cursor..end) |i| {
                 for (0..4) |j| {
-                    buf[j][i - p.cursor] += sh[j] * samples[i];
+                    buf[j][i - p.cursor] += sh[j] * samples[i] * p.gain;
                 }
             }
             p.cursor = end;
@@ -197,6 +205,18 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
         }
     }
     return buf;
+}
+
+fn rotateAmbisonic(system: *SoundSystem, ambisonic: *[4][frame_size]f32) void {
+    for (0..frame_size) |i| {
+        const a = zm.rotate(
+            system.orientation,
+            zm.f32x4(ambisonic[1][i], ambisonic[2][i], ambisonic[3][i], 1.0),
+        );
+        ambisonic[1][i] = a[0];
+        ambisonic[2][i] = a[1];
+        ambisonic[3][i] = a[2];
+    }
 }
 
 const identity_ir = blk: {
@@ -230,6 +250,7 @@ fn convolve(input: []const f32, ir: []const f32, output: []f32) void {
 const Playing = struct {
     sound: usize, // should be a type safe id in a proper implementation
     pos: zm.Vec,
+    gain: f32 = 1.0,
     cursor: usize = 0,
     repeat: bool = false,
     finished: bool = false,

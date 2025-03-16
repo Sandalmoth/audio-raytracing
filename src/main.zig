@@ -320,7 +320,7 @@ pub fn main() !void {
 
     const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
     const music_handle = try sound_system.playSound(
-        .{ .sound = music, .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0), .repeat = true },
+        .{ .sound = music, .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0), .repeat = true, .gain = 0.2 },
     );
     _ = music_handle;
 
@@ -362,6 +362,21 @@ pub fn main() !void {
             lag -= tick_ns;
             time += 1.0 / @as(f64, @floatFromInt(ticks_per_second));
         }
+
+        // begin audio state update here maybe?
+        // std.debug.print("{}\n", .{state.camera});
+        {
+            sound_system.mutex.lock();
+            defer sound_system.mutex.unlock();
+
+            sound_system.listener = state.camera.pos;
+            sound_system.orientation = zm.quatFromRollPitchYaw(
+                state.camera.pitch,
+                state.camera.yaw,
+                0,
+            );
+        }
+        // end audio state update
 
         // begin draw
         const alpha = @as(f32, @floatFromInt(lag)) / @as(f32, @floatFromInt(tick_ns));
