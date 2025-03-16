@@ -21,10 +21,8 @@ const sound_render_spec = sdl.c.SDL_AudioSpec{
 };
 
 const hrtf: struct {
-    elevation_resolution: f32,
-    azimuth_resolution: f32,
-    irs_l: []const []const []const f32,
-    irs_r: []const []const []const f32,
+    irs_l: []const []const f32,
+    irs_r: []const []const f32,
 } = @import("hrtf.zon");
 
 const frame_size = 128;
@@ -155,37 +153,44 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
     while (it.next()) |kv| {
         const p = kv.value_ptr;
         // ambisonic components
-        const w: f32, const x: f32, const y: f32, const z: f32 = blk: {
-            // if distance is below threshold, smoothly scale to 0 directional component
+        const sh: [4]f32 = blk: {
+            // if distance is below threshold, smoothly scale to 0 directional components
+            // we are using N3D normalization for the spherical harmonics
+            // however, the coordinate system is rotated to match
+            // +x -> front
+            // +y -> up
+            // +z -> right
             const dir = system.listener - p.pos;
             const len = zm.length3(dir)[0];
-            if (len < 1e-9) break :blk .{ std.math.sqrt1_2, 0.0, 0.0, 0.0 };
-            const ndir = zm.normalize3(dir);
-            const t = 0.1;
-            if (len < t) {
-                const d = ndir * zm.splat(zm.F32x4, len / t);
-                break :blk .{ std.math.sqrt1_2, d[0], d[1], d[2] };
-            } else {
-                break :blk .{ std.math.sqrt1_2, ndir[0], ndir[1], ndir[2] };
-            }
+            const t: f32 = 0.1;
+            const norm = if (len < 1e-6)
+                0.0
+            else if (len < t)
+                @sqrt(3.0) / t
+            else
+                @sqrt(3.0) / len;
+            break :blk .{
+                1.0,
+                norm * dir[0],
+                norm * dir[1],
+                norm * dir[2],
+            };
         };
         const s = system.sounds.items[p.sound];
         const samples = s.samples();
         if (p.repeat) {
             for (0..128) |i| {
-                buf[0][i] += w * samples[(p.cursor + i) % samples.len];
-                buf[1][i] += x * samples[(p.cursor + i) % samples.len];
-                buf[2][i] += y * samples[(p.cursor + i) % samples.len];
-                buf[3][i] += z * samples[(p.cursor + i) % samples.len];
+                for (0..4) |j| {
+                    buf[j][i] += sh[j] * samples[(p.cursor + i) % samples.len];
+                }
             }
             p.cursor += 128;
         } else {
             const end = @min(p.cursor + 128, samples.len);
             for (p.cursor..end) |i| {
-                buf[0][i - p.cursor] += w * samples[i];
-                buf[1][i - p.cursor] += x * samples[i];
-                buf[2][i - p.cursor] += y * samples[i];
-                buf[3][i - p.cursor] += z * samples[i];
+                for (0..4) |j| {
+                    buf[j][i - p.cursor] += sh[j] * samples[i];
+                }
             }
             p.cursor = end;
             if (p.cursor == samples.len) p.finished = true;
@@ -201,93 +206,15 @@ const identity_ir = blk: {
 };
 
 fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) void {
-    const scale = 1.0 / 4.0;
     var conv_bufs: [2][2 * frame_size]f32 = undefined;
-    for ([_][2]f32{
-        .{ 0.0 * std.math.pi, 0.0 },
-        // .{ 0.5 * std.math.pi, 0.0 },
-        .{ 1.0 * std.math.pi, 0.0 },
-        // .{ 1.5 * std.math.pi, 0.0 },
-        // .{ 0.0, -0.5 * std.math.pi },
-        // .{ 0.0, 0.5 * std.math.pi },
-        // .{ 0.25 * std.math.pi, 0.25 * std.math.pi },
-        // .{ 0.75 * std.math.pi, 0.25 * std.math.pi },
-        // .{ 1.25 * std.math.pi, 0.25 * std.math.pi },
-        // .{ 1.75 * std.math.pi, 0.25 * std.math.pi },
-        // .{ 0.25 * std.math.pi, -0.25 * std.math.pi },
-        // .{ 0.75 * std.math.pi, -0.25 * std.math.pi },
-        // .{ 1.25 * std.math.pi, -0.25 * std.math.pi },
-        // .{ 1.75 * std.math.pi, -0.25 * std.math.pi },
-    }) |ae| {
-        const azim, const elev = ae;
-        const irs = getHrtfIr(azim, elev);
-        convolve(&ambisonic[0], irs[0], &conv_bufs[0]);
-        convolve(&ambisonic[0], irs[1], &conv_bufs[1]);
-        // _ = irs;
-        // convolve(&ambisonic[0], &identity_ir, &conv_bufs[0]);
-        // convolve(&ambisonic[0], &identity_ir, &conv_bufs[1]);
-
-        for (0..frame_size) |i| {
-            system.stereo_frame_buffer[i][0] += conv_bufs[0][i] * scale;
-            system.stereo_frame_buffer[i][1] += conv_bufs[1][i] * scale;
-            system.stereo_frame_buffer[i + frame_size][0] = conv_bufs[0][i + frame_size] * scale;
-            system.stereo_frame_buffer[i + frame_size][1] = conv_bufs[1][i + frame_size] * scale;
+    for (0..4) |i| {
+        convolve(&ambisonic[i], hrtf.irs_l[i], &conv_bufs[0]);
+        convolve(&ambisonic[i], hrtf.irs_r[i], &conv_bufs[1]);
+        for (0..2 * frame_size) |j| {
+            system.stereo_frame_buffer[j][0] += conv_bufs[0][j];
+            system.stereo_frame_buffer[j][1] += conv_bufs[1][j];
         }
     }
-
-    // for (&ambisonic[0], 0..) |sample, i| {
-    //     system.stereo_frame_buffer[i][0] = sample;
-    //     system.stereo_frame_buffer[i][1] = sample;
-    // }
-}
-
-// class HRTFStreamProcessor:
-//     def __init__(self, hrtf_data, frame_size=256):
-//         self.hrtf_data = hrtf_data
-//         self.frame_size = frame_size
-//         self.input_buffer = np.zeros(frame_size * 2)  # Buffer for overlap-add
-//         self.output_buffer = np.zeros(frame_size * 2)  # Buffer for overlap-add
-
-//     def process_frame(self, mono_frame, azimuth, elevation):
-//         # Apply distance attenuation (if needed)
-//         # mono_frame = apply_distance_attenuation(mono_frame, distance)
-
-//         # Get the HRTF for the current direction
-//         hrtf_left, hrtf_right = interpolate_hrtf(azimuth, elevation, self.hrtf_data)
-
-//         # Convolve the frame with the HRTF using overlap-add
-//         padded_frame = np.concatenate([mono_frame, np.zeros(len(hrtf_left) - 1)])
-//         spatialized_left = convolve(padded_frame, hrtf_left, mode='valid')
-//         spatialized_right = convolve(padded_frame, hrtf_right, mode='valid')
-
-//         # Overlap-add to handle streaming
-//         self.output_buffer[:self.frame_size] += spatialized_left[:self.frame_size]
-//         self.output_buffer[self.frame_size:] = spatialized_left[self.frame_size:]
-
-//         # Output the current frame
-//         output_frame = self.output_buffer[:self.frame_size]
-//         self.output_buffer = np.roll(self.output_buffer, -self.frame_size)
-//         self.output_buffer[-self.frame_size:] = 0  # Clear the end for next frame
-
-//         return output_frame
-
-fn getHrtfIr(azimuth: f32, elevation: f32) [2][]const f32 {
-    std.debug.assert(azimuth >= 0);
-    std.debug.assert(azimuth <= std.math.tau);
-    std.debug.assert(elevation >= -0.5 * std.math.pi);
-    std.debug.assert(elevation <= 0.5 * std.math.pi);
-
-    const ix_azim = @as(usize, @intFromFloat(@round(
-        azimuth / std.math.tau * @as(f32, @floatFromInt(hrtf.irs_l[0].len)),
-    ))) % hrtf.irs_l[0].len;
-    const ix_elev = @as(usize, @intFromFloat(@round(
-        (elevation + 0.5 * std.math.pi) / std.math.pi * @as(f32, @floatFromInt(hrtf.irs_l.len)),
-    ))) % hrtf.irs_l.len;
-
-    return .{
-        hrtf.irs_l[ix_elev][ix_azim],
-        hrtf.irs_r[ix_elev][ix_azim],
-    };
 }
 
 fn convolve(input: []const f32, ir: []const f32, output: []f32) void {
