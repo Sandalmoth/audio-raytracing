@@ -161,7 +161,7 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
     while (it.next()) |kv| {
         const p = kv.value_ptr;
         // ambisonic components
-        const sh: [4]f32 = blk: {
+        const sh: [4]f32, const dist: f32 = blk: {
             // if distance is below threshold, smoothly scale to 0 directional components
             // we are using N3D normalization for the spherical harmonics
             // however, the coordinate system is rotated to match
@@ -177,19 +177,32 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
                 @sqrt(3.0) / t
             else
                 @sqrt(3.0) / len;
-            break :blk .{
+            break :blk .{ .{
                 1.0,
                 norm * dir[0],
                 norm * dir[1],
                 norm * dir[2],
-            };
+            }, len };
         };
         const s = system.sounds.items[p.sound];
         const samples = s.samples();
+
+        p.attenuation_eq.gains = std.math.clamp(
+            @as(@Vector(4, f32), @splat(1.0)) -
+                @as(@Vector(4, f32), @splat(1e-5 * dist)) * Equalizer.freqs,
+            @as(@Vector(4, f32), @splat(0.0)),
+            @as(@Vector(4, f32), @splat(1.0)),
+        ); // air absorbtion
+        // std.debug.print("{}\n", .{p.attenuation_eq.gains});
+        p.attenuation_eq.gains *= @splat(1 / (dist + 1)); // distance attenuation
+
         if (p.repeat) {
             for (0..128) |i| {
                 for (0..4) |j| {
-                    buf[j][i] += sh[j] * samples[(p.cursor + i) % samples.len] * p.gain;
+                    const sample = p.attenuation_eq.apply(
+                        samples[(p.cursor + i) % samples.len],
+                    );
+                    buf[j][i] += sh[j] * sample * p.gain;
                 }
             }
             p.cursor += 128;
@@ -197,7 +210,10 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
             const end = @min(p.cursor + 128, samples.len);
             for (p.cursor..end) |i| {
                 for (0..4) |j| {
-                    buf[j][i - p.cursor] += sh[j] * samples[i] * p.gain;
+                    const sample = p.attenuation_eq.apply(
+                        samples[i],
+                    );
+                    buf[j][i - p.cursor] += sh[j] * sample * p.gain;
                 }
             }
             p.cursor = end;
@@ -254,6 +270,40 @@ const Playing = struct {
     cursor: usize = 0,
     repeat: bool = false,
     finished: bool = false,
+    attenuation_eq: Equalizer = .{},
+};
+
+const Equalizer = struct {
+    // breakpoints at 16 256 4096, LR2 filters
+    const as: @Vector(4, f32) =
+        .{ -0.9977229806593002, -0.9977229806593002, -0.9641755363925378, -0.5380310834985628 };
+    const bs: [2]@Vector(4, f32) = .{
+        .{ 0.0011385096703499323, 0.9988614903296501, 0.982087768196269, 0.7690155417492813 },
+        .{ 0.0011385096703499323, -0.9988614903296501, -0.982087768196269, -0.7690155417492813 },
+    };
+    const freqs = @Vector(4, f32){ 4.0000e+00, 6.4000e+01, 1.0240e+03, 1.6384e+04 };
+
+    gains: @Vector(4, f32) = @splat(1),
+    zs: @Vector(4, f32) = @splat(0),
+
+    fn apply(eq: *Equalizer, x: f32) f32 {
+        // split into four bands using LR2 filters
+        // 128hz, 768hz, 4608hz breakpoints
+        const xs: @Vector(4, f32) = @splat(x);
+        const ys = bs[0] * xs + eq.zs;
+        eq.zs = bs[1] * xs - as * ys;
+        // then apply a gain to each band and add back together
+        // the select uses the low/high-pass filters to create four bands like so
+        // low - mid_low,   mid_low - mid_high,   mid_high - high,   high
+        const bands = ys - @shuffle(
+            f32,
+            ys,
+            @as(@Vector(4, f32), @splat(0.0)),
+            @as(@Vector(4, i32), .{ -1, 2, 3, -1 }),
+        );
+        // return @reduce(.Add, bands * eq.gains);
+        return @reduce(.Add, bands * @Vector(4, f32){ 1, -1, 1, -1 } * eq.gains);
+    }
 };
 
 const Sound = struct {

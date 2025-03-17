@@ -296,7 +296,17 @@ pub fn main() !void {
             .offset = 0,
             .pixels_per_row = 2,
             .rows_per_layer = 2,
-        }, &.{ .texture = gradient_texture, .mip_level = 0, .layer = 0, .x = 0, .y = 0, .z = 0, .w = 2, .h = 2, .d = 1 }, true);
+        }, &.{
+            .texture = gradient_texture,
+            .mip_level = 0,
+            .layer = 0,
+            .x = 0,
+            .y = 0,
+            .z = 0,
+            .w = 2,
+            .h = 2,
+            .d = 1,
+        }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
 
         if (!sdl.c.SDL_SubmitGPUCommandBuffer(command_buffer)) {
@@ -319,9 +329,13 @@ pub fn main() !void {
     defer sound_system.deinit();
 
     const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
-    const music_handle = try sound_system.playSound(
-        .{ .sound = music, .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0), .repeat = true, .gain = 0.2 },
-    );
+    const music_handle = try sound_system.playSound(.{
+        .sound = music,
+        .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0),
+        .repeat = true,
+        .gain = 1.0,
+        .attenuation_eq = .{ .gains = .{ 1, 1, 1, 1 } },
+    });
     _ = music_handle;
 
     const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
@@ -353,7 +367,7 @@ pub fn main() !void {
             state.camera.update(&input);
 
             if (input.peek(.fire).pressed) {
-                _ = try sound_system.playSound(.{ .sound = blip, .pos = zm.f32x4s(0.0) });
+                _ = try sound_system.playSound(.{ .sound = blip, .pos = zm.f32x4s(0.0), .gain = 0.2 });
             }
 
             input.decay();
@@ -544,7 +558,7 @@ const Camera = struct {
 
     const up = zm.f32x4(0.0, 1.0, 0.0, 0.0);
     const mouse_sensitivity = 0.3;
-    const move_speed = 0.5;
+    const move_speed = 5;
 
     fn update(camera: *Camera, input: *Input) void {
         camera.prev_pos = camera.pos;
@@ -560,21 +574,21 @@ const Camera = struct {
             0.0,
             @sin(camera.yaw),
             0.0,
-        ) * zm.f32x4s(tick);
+        ) * zm.f32x4s(move_speed * tick);
 
         const right = zm.f32x4(
             @cos(camera.yaw + 0.5 * std.math.pi),
             0.0,
             @sin(camera.yaw + 0.5 * std.math.pi),
             0.0,
-        ) * zm.f32x4s(tick);
+        ) * zm.f32x4s(move_speed * tick);
 
         if (input.peek(.forward).held) camera.pos += forward;
         if (input.peek(.backward).held) camera.pos -= forward;
         if (input.peek(.right).held) camera.pos += right;
         if (input.peek(.left).held) camera.pos -= right;
-        if (input.peek(.up).held) camera.pos += up * zm.f32x4s(tick);
-        if (input.peek(.down).held) camera.pos -= up * zm.f32x4s(tick);
+        if (input.peek(.up).held) camera.pos += up * zm.f32x4s(move_speed * tick);
+        if (input.peek(.down).held) camera.pos -= up * zm.f32x4s(move_speed * tick);
     }
 
     fn vp(camera: Camera, alpha: f32) zm.Mat {
