@@ -334,7 +334,6 @@ pub fn main() !void {
         .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0),
         .repeat = true,
         .gain = 1.0,
-        .attenuation_eq = .{ .gains = .{ 1, 1, 1, 1 } },
     });
     _ = music_handle;
 

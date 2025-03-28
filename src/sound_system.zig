@@ -118,8 +118,8 @@ fn callback(
     additional_amount: c_int,
     total_amount: c_int,
 ) callconv(.c) void {
-    // var t = std.time.Timer.start() catch unreachable;
-    // defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
+    var t = std.time.Timer.start() catch unreachable;
+    defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     system.mutex.lock();
     defer system.mutex.unlock();
@@ -128,7 +128,9 @@ fn callback(
     _ = total_amount;
 
     while (n_samples > 0) : (n_samples -= 128) {
-        var ambisonic = system.buildAmbisonic();
+        var ambisonic = std.mem.zeroes([4][frame_size]f32);
+        var reverb = std.mem.zeroes([frame_size]f32);
+        system.buildAmbisonicReverb(&ambisonic, &reverb);
         system.rotateAmbisonic(&ambisonic);
         system.ambisonicToStereo(ambisonic);
         if (!sdl.c.SDL_PutAudioStreamData(
@@ -155,8 +157,13 @@ fn callback(
     }
 }
 
-fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
-    var buf = std.mem.zeroes([4][frame_size]f32);
+fn buildAmbisonicReverb(
+    system: *SoundSystem,
+    buf: *[4][frame_size]f32,
+    buf2: *[frame_size]f32,
+) void {
+    // buf - ambisonic
+    // buf2 - reverb
     var it = system.playing.iterator();
     while (it.next()) |kv| {
         const p = kv.value_ptr;
@@ -196,8 +203,11 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
         // std.debug.print("{}\n", .{p.attenuation_eq.gains});
         p.attenuation_eq.gains *= @splat(1 / (dist + 1)); // distance attenuation
 
+        var reverb_input = std.mem.zeroes([frame_size]f32);
+
         if (p.repeat) {
             for (0..128) |i| {
+                reverb_input[i] = samples[(p.cursor + i) % samples.len] * p.gain / (dist + 1);
                 for (0..4) |j| {
                     const sample = p.attenuation_eq.apply(
                         samples[(p.cursor + i) % samples.len],
@@ -208,19 +218,27 @@ fn buildAmbisonic(system: *SoundSystem) [4][frame_size]f32 {
             p.cursor += 128;
         } else {
             const end = @min(p.cursor + 128, samples.len);
-            for (p.cursor..end) |i| {
+            for (p.cursor..end, 0..) |i, k| {
+                reverb_input[k] = samples[i] * p.gain;
                 for (0..4) |j| {
                     const sample = p.attenuation_eq.apply(
                         samples[i],
                     );
-                    buf[j][i - p.cursor] += sh[j] * sample * p.gain;
+                    buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 1);
                 }
             }
             p.cursor = end;
             if (p.cursor == samples.len) p.finished = true;
         }
+
+        p.reverb.apply(reverb_input, buf2);
     }
-    return buf;
+
+    // apply reverb nondirectionally
+    const wet = 0.2; // TODO
+    for (0..frame_size) |i| {
+        buf[0][i] += wet * buf2[i];
+    }
 }
 
 fn rotateAmbisonic(system: *SoundSystem, ambisonic: *[4][frame_size]f32) void {
@@ -271,6 +289,7 @@ const Playing = struct {
     repeat: bool = false,
     finished: bool = false,
     attenuation_eq: Equalizer = .{},
+    reverb: Reverb = .init,
 };
 
 const Equalizer = struct {
@@ -303,6 +322,94 @@ const Equalizer = struct {
         );
         // return @reduce(.Add, bands * eq.gains);
         return @reduce(.Add, bands * @Vector(4, f32){ 1, -1, 1, -1 } * eq.gains);
+    }
+};
+
+const Reverb = struct {
+    const diffuser_delays: [4][4]u32 = .{
+        .{ 383, 947, 1489, 3571 },
+        .{ 31, 449, 937, 2671 },
+        .{ 131, 179, 1619, 1879 },
+        .{ 463, 593, 443, 887 },
+    };
+    const diffuser_shuffles: [4][4]u32 = .{
+        .{ 3, 1, 0, 2 },
+        .{ 0, 1, 3, 2 },
+        .{ 0, 1, 3, 2 },
+        .{ 2, 0, 3, 1 },
+    };
+    const diffuser_polarities: [4][4]f32 = .{
+        .{ -1, 1, 1, -1 },
+        .{ -1, -1, 1, 1 },
+        .{ 1, -1, 1, -1 },
+        .{ -1, 1, 1, -1 },
+    };
+    const feedback_delays: [4]f32 = .{};
+    const hadamard = zm.matFromArr(.{ 1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, -1, -1, 1 });
+
+    diffuser_buffers: [4][4][4096]f32,
+    diffuser_cursors: [4][4]u32,
+    feedback_buffers: [4][8192]f32,
+    feedback_cursors: [4]u32,
+    feedback_filter_state: @Vector(4, f32),
+
+    const init = std.mem.zeroInit(Reverb, .{});
+
+    fn apply(rev: *Reverb, samples: [frame_size]f32, result: *[frame_size]f32) void {
+        // split into channels
+        var chunk: [4][frame_size]f32 = .{ samples, samples, samples, samples };
+        for (0..frame_size) |i| {
+            chunk[0][i] *= 0.25;
+            chunk[1][i] *= 0.25;
+            chunk[2][i] *= 0.25;
+            chunk[3][i] *= 0.25;
+        }
+        // diffusion
+        for (
+            diffuser_delays,
+            diffuser_shuffles,
+            diffuser_polarities,
+            0..,
+        ) |delays, shuffles, polarities, i| {
+            for (0..4) |k| {
+                for (0..frame_size) |j| {
+                    const sample = chunk[k][j];
+                    const cursor = rev.diffuser_cursors[k][i];
+                    chunk[k][j] = rev.diffuser_buffers[k][i][cursor];
+                    rev.diffuser_buffers[k][i][cursor] = sample;
+                    rev.diffuser_cursors[k][i] = (cursor + 1) % delays[k];
+                }
+            }
+            for (0..frame_size) |j| {
+                const s: [4]f32 = .{
+                    chunk[shuffles[0]][j] * polarities[0],
+                    chunk[shuffles[1]][j] * polarities[1],
+                    chunk[shuffles[2]][j] * polarities[2],
+                    chunk[shuffles[3]][j] * polarities[3],
+                };
+                chunk[0][j] = s[0];
+                chunk[1][j] = s[1];
+                chunk[2][j] = s[2];
+                chunk[3][j] = s[3];
+            }
+            for (0..frame_size / 4) |j| {
+                var a: zm.Mat = undefined;
+                a[0] = chunk[0][j * 4 ..][0..4].*;
+                a[1] = chunk[1][j * 4 ..][0..4].*;
+                a[2] = chunk[2][j * 4 ..][0..4].*;
+                a[3] = chunk[3][j * 4 ..][0..4].*;
+                // a = zm.mul(a, hadamard);
+                a = zm.mul(hadamard, a);
+                chunk[0][j * 4 ..][0..4].* = a[0];
+                chunk[1][j * 4 ..][0..4].* = a[1];
+                chunk[2][j * 4 ..][0..4].* = a[2];
+                chunk[3][j * 4 ..][0..4].* = a[3];
+            }
+        }
+        // feedforward
+        for (0..frame_size) |i| result[i] += chunk[0][i] + chunk[1][i] + chunk[2][i] + chunk[3][i];
+        // feedback
+        // mix
     }
 };
 
