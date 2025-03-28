@@ -217,8 +217,9 @@ fn buildAmbisonicReverb(
             }
             p.cursor += 128;
         } else {
+            const begin = @min(p.cursor, samples.len);
             const end = @min(p.cursor + 128, samples.len);
-            for (p.cursor..end, 0..) |i, k| {
+            for (begin..end, 0..) |i, k| {
                 reverb_input[k] = samples[i] * p.gain;
                 for (0..4) |j| {
                     const sample = p.attenuation_eq.apply(
@@ -227,8 +228,10 @@ fn buildAmbisonicReverb(
                     buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 2);
                 }
             }
-            p.cursor = end;
-            if (p.cursor == samples.len) p.finished = true;
+            // p.cursor = end;
+            // if (p.cursor == samples.len) p.finished = true;
+            p.cursor += 128;
+            if (p.cursor >= samples.len + 65536) p.finished = true;
         }
 
         p.reverb.apply(reverb_input, buf2);
