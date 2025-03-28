@@ -207,7 +207,7 @@ fn buildAmbisonicReverb(
 
         if (p.repeat) {
             for (0..128) |i| {
-                reverb_input[i] = samples[(p.cursor + i) % samples.len] * p.gain / (dist + 1);
+                reverb_input[i] = samples[(p.cursor + i) % samples.len] * p.gain / (dist + 2);
                 for (0..4) |j| {
                     const sample = p.attenuation_eq.apply(
                         samples[(p.cursor + i) % samples.len],
@@ -224,7 +224,7 @@ fn buildAmbisonicReverb(
                     const sample = p.attenuation_eq.apply(
                         samples[i],
                     );
-                    buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 1);
+                    buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 2);
                 }
             }
             p.cursor = end;
@@ -344,14 +344,26 @@ const Reverb = struct {
         .{ 1, -1, 1, -1 },
         .{ -1, 1, 1, -1 },
     };
-    const feedback_delays: [4]f32 = .{};
-    const hadamard = zm.matFromArr(.{ 1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, -1, -1, 1 });
+    const feedback_delays: [4]u32 = .{ 6427, 2153, 5153, 2879 };
+    const hadamard: zm.Mat = .{
+        .{ 1, 1, 1, 1 },
+        .{ 1, -1, 1, -1 },
+        .{ 1, 1, -1, -1 },
+        .{ 1, -1, -1, 1 },
+    };
+    const householder: zm.Mat = .{
+        .{ 0.5, -0.5, -0.5, -0.5 },
+        .{ -0.5, 0.5, -0.5, -0.5 },
+        .{ -0.5, -0.5, 0.5, -0.5 },
+        .{ -0.5, -0.5, -0.5, 0.5 },
+    };
 
     diffuser_buffers: [4][4][4096]f32,
     diffuser_cursors: [4][4]u32,
     feedback_buffers: [4][8192]f32,
     feedback_cursors: [4]u32,
     feedback_filter_state: @Vector(4, f32),
+    feedback_gain: f32 = 0.9,
 
     const init = std.mem.zeroInit(Reverb, .{});
 
@@ -409,7 +421,44 @@ const Reverb = struct {
         // feedforward
         for (0..frame_size) |i| result[i] += chunk[0][i] + chunk[1][i] + chunk[2][i] + chunk[3][i];
         // feedback
+        for (0..frame_size) |j| {
+            const current: @Vector(4, f32) = .{
+                chunk[0][j],
+                chunk[1][j],
+                chunk[2][j],
+                chunk[3][j],
+            };
+            for (0..4) |i| {
+                const cursor = rev.feedback_cursors[i];
+                chunk[i][j] = rev.feedback_buffers[i][cursor];
+            }
+            var future: @Vector(4, f32) = .{
+                chunk[0][j],
+                chunk[1][j],
+                chunk[2][j],
+                chunk[3][j],
+            };
+            future *= @as(@Vector(4, f32), @splat(rev.feedback_gain));
+            const alpha: @Vector(4, f32) = @splat(0.2);
+            future = alpha * future + (zm.f32x4s(1.0) - alpha) * rev.feedback_filter_state;
+            rev.feedback_filter_state = future;
+            future = zm.mul(householder, future);
+            future += current;
+            for (0..4) |i| {
+                const cursor = rev.feedback_cursors[i];
+                rev.feedback_buffers[i][cursor] = future[i];
+                rev.feedback_cursors[i] = (cursor + 1) % feedback_delays[i];
+            }
+        }
         // mix
+        for (0..frame_size) |i| {
+            result[i] += chunk[0][i];
+            result[i] += chunk[1][i];
+            result[i] += chunk[2][i];
+            result[i] += chunk[3][i];
+        }
+
+        for (0..frame_size) |i| result[i] *= 0.5;
     }
 };
 
