@@ -105,6 +105,8 @@ pub fn loadSound(system: *SoundSystem, filename: [*c]const u8) !usize {
 }
 
 pub fn playSound(system: *SoundSystem, p: Playing) !usize {
+    system.mutex.lock();
+    defer system.mutex.unlock();
     try system.playing.ensureUnusedCapacity(system.gpa, 1);
     const result = system.playing_counter;
     system.playing.putAssumeCapacity(result, p);
