@@ -315,6 +315,77 @@ pub fn main() !void {
         }
     }
 
+    var vertices = std.ArrayList(Vertex).init(gpa);
+    defer vertices.deinit();
+    { // read all triangles from obj file
+        var raw_vertices = std.ArrayList([3]f32).init(gpa);
+        defer raw_vertices.deinit();
+        var raw_uvs = std.ArrayList([2]f32).init(gpa);
+        defer raw_uvs.deinit();
+        var triangles = std.ArrayList(
+            struct { a: u32, b: u32, c: u32, d: u32, e: u32, f: u32 },
+        ).init(gpa);
+        defer triangles.deinit();
+
+        const file = try std.fs.cwd().openFile(
+            "data/world.obj",
+            .{ .mode = .read_only },
+        );
+        defer file.close();
+        const bytes = try file.reader().readAllAlloc(gpa, 1_000_000);
+        defer gpa.free(bytes);
+
+        var it = std.mem.tokenizeAny(u8, bytes, "\n");
+        while (it.next()) |line| {
+            if (std.mem.eql(u8, line[0..2], "vt")) {
+                std.debug.print("tex\t{s}\n", .{line});
+                var it2 = std.mem.tokenizeAny(u8, line, " ");
+                _ = it2.next();
+                try raw_uvs.append(.{
+                    try std.fmt.parseFloat(f32, it2.next().?),
+                    try std.fmt.parseFloat(f32, it2.next().?),
+                });
+            } else if (std.mem.eql(u8, line[0..1], "v")) {
+                std.debug.print("vertex\t{s}\n", .{line});
+                var it2 = std.mem.tokenizeAny(u8, line, " ");
+                _ = it2.next();
+                try raw_vertices.append(.{
+                    try std.fmt.parseFloat(f32, it2.next().?),
+                    try std.fmt.parseFloat(f32, it2.next().?),
+                    try std.fmt.parseFloat(f32, it2.next().?),
+                });
+            } else if (std.mem.eql(u8, line[0..1], "f")) {
+                std.debug.print("face\t{s}\n", .{line});
+                var it2 = std.mem.tokenizeAny(u8, line, " /");
+                _ = it2.next();
+                try triangles.append(.{
+                    .a = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                    .b = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                    .c = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                    .d = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                    .e = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                    .f = try std.fmt.parseInt(u32, it2.next().?, 10) - 1,
+                });
+            }
+        }
+
+        for (triangles.items) |tri| {
+            try vertices.append(.{
+                .pos = raw_vertices.items[tri.a],
+                .uv = raw_uvs.items[tri.b],
+            });
+            try vertices.append(.{
+                .pos = raw_vertices.items[tri.c],
+                .uv = raw_uvs.items[tri.d],
+            });
+            try vertices.append(.{
+                .pos = raw_vertices.items[tri.e],
+                .uv = raw_uvs.items[tri.f],
+            });
+        }
+    }
+    for (vertices.items) |v| std.debug.print("{}\n", .{v});
+
     var input = Input.init(gpa);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_W }, .forward);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_S }, .backward);
@@ -414,11 +485,11 @@ pub fn main() !void {
                 .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 0 } },
                 .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
                 .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 1 } },
-                //
-                .{ .pos = .{ -0.5, -0.5, 0 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ -0.5, 0.5, 0 }, .uv = .{ 0, 1 } },
-                .{ .pos = .{ 0.5, -0.5, 0 }, .uv = .{ 1, 0 } },
-            },
+            }, // quad for backbuffer -> swapchain renderpass
+        );
+        @memcpy(
+            bytes + 6,
+            vertices.items,
         );
         sdl.c.SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
         const copy_pass = sdl.c.SDL_BeginGPUCopyPass(command_buffer);
@@ -428,7 +499,7 @@ pub fn main() !void {
         }, &.{
             .buffer = vertex_buffer,
             .offset = 0,
-            .size = @sizeOf(Vertex) * 9, // NOTE
+            .size = @sizeOf(Vertex) * (6 + @as(u32, @intCast(vertices.items.len))),
         }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
 
@@ -468,7 +539,7 @@ pub fn main() !void {
             &state.camera.vp(alpha),
             @sizeOf(zm.Mat),
         );
-        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, 3, 1, 6, 0);
+        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, @intCast(vertices.items.len), 1, 6, 0);
         sdl.c.SDL_EndGPURenderPass(main_render_pass);
 
         var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
