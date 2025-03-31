@@ -120,11 +120,11 @@ fn callback(
     additional_amount: c_int,
     total_amount: c_int,
 ) callconv(.c) void {
-    var t = std.time.Timer.start() catch unreachable;
-    defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     system.mutex.lock();
     defer system.mutex.unlock();
+    var t = std.time.Timer.start() catch unreachable;
+    defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
 
     var n_samples = @divTrunc(additional_amount, 2 * @sizeOf(f32));
     _ = total_amount;
@@ -237,12 +237,11 @@ fn buildAmbisonicReverb(
         }
 
         p.reverb.apply(reverb_input, buf2);
-    }
 
-    // apply reverb nondirectionally
-    const wet = 0.2; // TODO
-    for (0..frame_size) |i| {
-        buf[0][i] += wet * buf2[i];
+        // apply reverb nondirectionally
+        for (0..frame_size) |i| {
+            buf[0][i] += p.wet * buf2[i];
+        }
     }
 }
 
@@ -295,6 +294,7 @@ const Playing = struct {
     finished: bool = false,
     attenuation_eq: Equalizer = .{},
     reverb: Reverb = .init,
+    wet: f32 = 0.05,
 };
 
 const Equalizer = struct {

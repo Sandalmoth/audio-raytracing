@@ -6,6 +6,8 @@ const zm = @import("zmath");
 const Input = @import("input.zig");
 const SoundSystem = @import("sound_system.zig");
 
+const SpaceBuilder = @import("raytracer.zig").Builder;
+
 const log = std.log;
 
 pub const ticks_per_second = 83;
@@ -384,7 +386,30 @@ pub fn main() !void {
             });
         }
     }
-    for (vertices.items) |v| std.debug.print("{}\n", .{v});
+
+    var space_builder = SpaceBuilder(u32).init(gpa);
+    {
+        var i: usize = 0;
+        std.debug.assert(vertices.items.len % 3 == 0);
+        while (i < vertices.items.len) : (i += 3) {
+            const v0 = vertices.items[i];
+            const v1 = vertices.items[i + 1];
+            const v2 = vertices.items[i + 2];
+            const low: [3]f32 = .{
+                @min(v0.pos[0], @min(v1.pos[0], v2.pos[0])),
+                @min(v0.pos[1], @min(v1.pos[1], v2.pos[1])),
+                @min(v0.pos[2], @min(v1.pos[2], v2.pos[2])),
+            };
+            const high: [3]f32 = .{
+                @max(v0.pos[0], @max(v1.pos[0], v2.pos[0])),
+                @max(v0.pos[1], @max(v1.pos[1], v2.pos[1])),
+                @max(v0.pos[2], @max(v1.pos[2], v2.pos[2])),
+            };
+            try space_builder.add(low, high, @intCast(i));
+        }
+    }
+    var space = try space_builder.finish();
+    defer space.deinit();
 
     var input = Input.init(gpa);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_W }, .forward);
@@ -449,9 +474,12 @@ pub fn main() !void {
 
         // begin audio state update here maybe?
         // std.debug.print("{}\n", .{state.camera});
+        // instead of locking, a triple buffer mailbox would prevent audio glitches
         {
             sound_system.mutex.lock();
             defer sound_system.mutex.unlock();
+            var t = std.time.Timer.start() catch unreachable;
+            defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
 
             sound_system.listener = state.camera.pos;
             sound_system.orientation = zm.quatFromRollPitchYaw(
@@ -459,6 +487,55 @@ pub fn main() !void {
                 state.camera.yaw,
                 0,
             );
+
+            var harmonic_mean_dist: f32 = 0;
+            var capped_mean_dist: f32 = 0;
+
+            for (raycast_sphere_pattern) |dir| {
+                const src: [3]f32 = .{
+                    state.camera.pos[0],
+                    state.camera.pos[1],
+                    state.camera.pos[2],
+                };
+                const isects, const n = space.raycastCapacity(src, dir, 128);
+                var best: u32 = std.math.maxInt(u32);
+                var dist: f32 = std.math.inf(f32);
+
+                // find the closest intersecting triangle
+                for (isects[0..n]) |i| {
+                    const d, _ = rayTriangleIntersection(
+                        src,
+                        dir,
+                        vertices.items[i].pos,
+                        vertices.items[i + 1].pos,
+                        vertices.items[i + 2].pos,
+                    ) orelse continue;
+                    if (d < dist) {
+                        dist = d;
+                        best = @intCast(i);
+                    }
+                }
+                std.debug.print("{} {}\n", .{ best, dist });
+
+                harmonic_mean_dist += 1.0 / dist;
+                capped_mean_dist += @min(dist, 25.0);
+            }
+            harmonic_mean_dist =
+                @as(f32, @floatFromInt(raycast_sphere_pattern.len)) / harmonic_mean_dist;
+            capped_mean_dist /= @as(f32, @floatFromInt(raycast_sphere_pattern.len));
+
+            std.debug.print(
+                "distance: {}\n          {}\n",
+                .{ harmonic_mean_dist, capped_mean_dist },
+            );
+
+            var it = sound_system.playing.iterator();
+            while (it.next()) |p| {
+                p.value_ptr.reverb.feedback_gain =
+                    @sqrt((26.0 - capped_mean_dist) / 25.0);
+                p.value_ptr.wet =
+                    ((50.0 - capped_mean_dist) / 50.0) * ((50.0 - capped_mean_dist) / 50.0);
+            }
         }
         // end audio state update
 
@@ -690,4 +767,68 @@ const Box = struct {
 const Vertex = extern struct {
     pos: [3]f32,
     uv: [2]f32,
+};
+
+fn rayTriangleIntersection(
+    _src: [3]f32,
+    _dir: [3]f32,
+    v0: [3]f32,
+    v1: [3]f32,
+    v2: [3]f32,
+) ?struct { f32, bool } {
+    const src = zm.loadArr3(_src);
+    const dir = zm.normalize3(zm.loadArr3(_dir));
+    const a = zm.loadArr3(v0);
+    const b = zm.loadArr3(v1);
+    const c = zm.loadArr3(v2);
+
+    // std.debug.print("{}->{}\n{} {} {}\n", .{ src, dir, a, b, c });
+
+    const eps: f32 = 1e-6;
+
+    const ab = b - a;
+    const ac = c - a;
+
+    const h = zm.cross3(dir, ac);
+    const d = zm.dot3(ab, h);
+    // std.debug.print("1 {}\n", .{d});
+    if (d[0] > -eps and d[0] < eps) return null;
+
+    const f = zm.f32x4s(1.0) / d;
+    const s = src - a;
+    const u = f * zm.dot3(s, h);
+    // std.debug.print("2 {}\n", .{u});
+    if (u[0] < 0.0 or u[0] > 1.0) return null;
+
+    const q = zm.cross3(s, ab);
+    const v = f * zm.dot3(dir, q);
+    // std.debug.print("3\n", .{});
+    if (v[0] < 0.0 or u[0] + v[0] > 1.0) return null;
+
+    const t = f * zm.dot3(ac, q);
+    // std.debug.print("4\n", .{});
+    if (t[0] < eps) return null;
+
+    // std.debug.print("5\n", .{});
+    return .{
+        t[0],
+        undefined, // TODO check if we hit front/back using winding order
+    };
+}
+
+const raycast_sphere_pattern = [_][3]f32{
+    .{ 1, 0, 0 },
+    .{ -1, 0, 0 },
+    .{ 0, 1, 0 },
+    .{ 0, -1, 0 },
+    .{ 0, 0, 1 },
+    .{ 0, 0, -1 },
+    .{ 1, 1, 1 },
+    .{ 1, 1, -1 },
+    .{ 1, -1, 1 },
+    .{ 1, -1, -1 },
+    .{ -1, 1, 1 },
+    .{ -1, 1, -1 },
+    .{ -1, -1, 1 },
+    .{ -1, -1, -1 },
 };
