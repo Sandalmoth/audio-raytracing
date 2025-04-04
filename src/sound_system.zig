@@ -26,6 +26,7 @@ const hrtf: struct {
 } = @import("hrtf.zon");
 
 const frame_size = 128;
+const speed_of_sound = 300.0;
 
 gpa: std.mem.Allocator,
 sounds: std.ArrayListUnmanaged(Sound),
@@ -123,8 +124,8 @@ fn callback(
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     system.mutex.lock();
     defer system.mutex.unlock();
-    var t = std.time.Timer.start() catch unreachable;
-    defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
+    // var t = std.time.Timer.start() catch unreachable;
+    // defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
 
     var n_samples = @divTrunc(additional_amount, 2 * @sizeOf(f32));
     _ = total_amount;
@@ -211,11 +212,53 @@ fn buildAmbisonicReverb(
             for (0..128) |i| {
                 reverb_input[i] = samples[(p.cursor + i) % samples.len] * p.gain / (dist + 2);
                 for (0..4) |j| {
+                    const offset = p.cursor + 1024 * 1024 * samples.len -
+                        @as(usize, @intFromFloat(44100 * dist / speed_of_sound));
                     const sample = p.attenuation_eq.apply(
-                        samples[(p.cursor + i) % samples.len],
+                        samples[(offset + i) % samples.len],
                     );
                     buf[j][i] += sh[j] * sample * p.gain;
                 }
+
+                // reflections go here
+                var offset: usize = 0;
+                var sample: f32 = undefined;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.x_pos_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.x_pos_lam / (p.reflections.x_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[1][i] += sample;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.x_neg_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.x_neg_lam / (p.reflections.x_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[1][i] -= sample;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.y_pos_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.y_pos_lam / (p.reflections.y_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[2][i] += sample;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.y_neg_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.y_neg_lam / (p.reflections.y_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[2][i] -= sample;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.z_pos_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.z_pos_lam / (p.reflections.z_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[3][i] += sample;
+                offset = p.cursor + 1024 * 1024 * samples.len -
+                    @as(usize, @intFromFloat(44100 * p.reflections.z_neg_dist / speed_of_sound));
+                sample = samples[(offset + i) % samples.len] * p.gain *
+                    p.reflections.z_neg_lam / (p.reflections.z_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[3][i] -= sample;
             }
             p.cursor += 128;
         } else {
@@ -229,6 +272,8 @@ fn buildAmbisonicReverb(
                     );
                     buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 2);
                 }
+
+                // reflections go here
             }
             // p.cursor = end;
             // if (p.cursor == samples.len) p.finished = true;
@@ -239,9 +284,9 @@ fn buildAmbisonicReverb(
         p.reverb.apply(reverb_input, buf2);
 
         // apply reverb nondirectionally
-        for (0..frame_size) |i| {
-            buf[0][i] += p.wet * buf2[i];
-        }
+        // for (0..frame_size) |i| {
+        //     buf[0][i] += p.wet * buf2[i];
+        // }
     }
 }
 
@@ -285,6 +330,21 @@ fn convolve(input: []const f32, ir: []const f32, output: []f32) void {
     }
 }
 
+const Reflections = struct {
+    x_pos_dist: f32 = 0.0,
+    x_neg_dist: f32 = 0.0,
+    x_pos_lam: f32 = 0.0,
+    x_neg_lam: f32 = 0.0,
+    y_pos_dist: f32 = 0.0,
+    y_neg_dist: f32 = 0.0,
+    y_pos_lam: f32 = 0.0,
+    y_neg_lam: f32 = 0.0,
+    z_pos_dist: f32 = 0.0,
+    z_neg_dist: f32 = 0.0,
+    z_pos_lam: f32 = 0.0,
+    z_neg_lam: f32 = 0.0,
+};
+
 const Playing = struct {
     sound: usize, // should be a type safe id in a proper implementation
     pos: zm.Vec,
@@ -294,7 +354,8 @@ const Playing = struct {
     finished: bool = false,
     attenuation_eq: Equalizer = .{},
     reverb: Reverb = .init,
-    wet: f32 = 0.05,
+    wet: f32 = 0.00,
+    reflections: Reflections = .{},
 };
 
 const Equalizer = struct {

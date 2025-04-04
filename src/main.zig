@@ -488,10 +488,18 @@ pub fn main() !void {
                 0,
             );
 
-            var harmonic_mean_dist: f32 = 0;
+            // TODO make this actually mathematically interesting
+            // I think this strategy of doing paired opposite distances for reverbs is good
+            // because you need things in both directions to get reverb, otherwise it's just echo
+            // however, as-is, this doesn't really work as intended
             var capped_mean_dist: f32 = 0;
+            var tmp_dist: f32 = 0;
+            var hit_dists: [raycast_sphere_pattern.len]f32 = undefined;
+            var hit_points: [raycast_sphere_pattern.len][3]f32 = undefined;
+            var hit_normals: [raycast_sphere_pattern.len][3]f32 = undefined;
+            var n_hits: usize = 0;
 
-            for (raycast_sphere_pattern) |dir| {
+            for (raycast_sphere_pattern, 0..) |dir, j| {
                 const src: [3]f32 = .{
                     state.camera.pos[0],
                     state.camera.pos[1],
@@ -517,24 +525,136 @@ pub fn main() !void {
                 }
                 std.debug.print("{} {}\n", .{ best, dist });
 
-                harmonic_mean_dist += 1.0 / dist;
-                capped_mean_dist += @min(dist, 25.0);
+                if (j % 2 == 0) {
+                    tmp_dist = @min(dist, 25.0);
+                } else {
+                    capped_mean_dist += @min(dist, 25.0) + tmp_dist;
+                }
+
+                if (best != std.math.maxInt(u32)) {
+                    hit_dists[n_hits] = dist;
+                    hit_normals[n_hits] = computeNormal(vertices.items[best .. best + 3]);
+                    hit_points[n_hits] = zm.vecToArr3(
+                        zm.loadArr3(src) +
+                            zm.normalize3(zm.loadArr3(dir)) * zm.splat(zm.F32x4, dist * 0.999),
+                    );
+                    n_hits += 1;
+                }
             }
-            harmonic_mean_dist =
-                @as(f32, @floatFromInt(raycast_sphere_pattern.len)) / harmonic_mean_dist;
             capped_mean_dist /= @as(f32, @floatFromInt(raycast_sphere_pattern.len));
 
-            std.debug.print(
-                "distance: {}\n          {}\n",
-                .{ harmonic_mean_dist, capped_mean_dist },
-            );
+            std.debug.print("distance: {}\n", .{capped_mean_dist});
+            std.debug.print("{any}\n", .{hit_dists[0..n_hits]});
+            std.debug.print("{any}\n", .{hit_normals[0..n_hits]});
 
             var it = sound_system.playing.iterator();
             while (it.next()) |p| {
+
+                // now raycast for the reflections
+                p.value_ptr.reflections = .{};
+                var total_weight = std.mem.zeroes([6]f32);
+
+                outer: for (0..n_hits) |i| {
+                    const dist = hit_dists[i];
+                    const point = hit_points[i];
+                    const normal = hit_normals[i];
+
+                    const dir = zm.vecToArr3(zm.loadArr3(point) - p.value_ptr.pos);
+                    const dist2 = zm.length3(zm.loadArr3(dir))[0];
+                    std.debug.print("{} {}\n", .{ dist, dist2 });
+                    if (zm.lengthSq3(zm.loadArr3(dir))[0] > 1e-3) {
+                        const isects, const n = space.raycastCapacity(
+                            zm.vecToArr3(p.value_ptr.pos),
+                            dir,
+                            128,
+                        );
+                        std.debug.print("{}\n", .{n});
+                        for (isects[0..n]) |j| {
+                            const d, _ = rayTriangleIntersection(
+                                zm.vecToArr3(p.value_ptr.pos),
+                                dir,
+                                vertices.items[j].pos,
+                                vertices.items[j + 1].pos,
+                                vertices.items[j + 2].pos,
+                            ) orelse continue;
+                            if (d > dist2) continue;
+                            std.debug.print("{}\n", .{d});
+                            continue :outer;
+                        }
+                    }
+                    // we have a clear path from the source to the listener reflection point
+                    // so record the reflection
+                    // reconstruct the original listener-ray and use to partition reflections
+                    const ld = zm.vecToArr3(state.camera.pos - zm.loadArr3(point));
+                    const total_dist = dist2 + dist;
+                    const lam = @abs(zm.dot3(
+                        zm.loadArr3(normal),
+                        zm.normalize3(zm.loadArr3(dir)),
+                    )[0]);
+                    const xpart = ld[0] * ld[0];
+                    const ypart = ld[1] * ld[1];
+                    const zpart = ld[2] * ld[2];
+                    std.debug.print("{any} {} {}\n", .{ ld, total_dist, lam });
+                    if (ld[0] > 0) {
+                        p.value_ptr.reflections.x_pos_dist += xpart * total_dist;
+                        p.value_ptr.reflections.x_pos_lam += xpart * lam;
+                        total_weight[0] += xpart;
+                    } else {
+                        p.value_ptr.reflections.x_neg_dist += xpart * total_dist;
+                        p.value_ptr.reflections.x_neg_lam += xpart * lam;
+                        total_weight[1] += xpart;
+                    }
+                    if (ld[1] > 0) {
+                        p.value_ptr.reflections.y_pos_dist += ypart * total_dist;
+                        p.value_ptr.reflections.y_pos_lam += ypart * lam;
+                        total_weight[2] += ypart;
+                    } else {
+                        p.value_ptr.reflections.y_neg_dist += ypart * total_dist;
+                        p.value_ptr.reflections.y_neg_lam += ypart * lam;
+                        total_weight[3] += ypart;
+                    }
+                    if (ld[0] > 2) {
+                        p.value_ptr.reflections.z_pos_dist += zpart * total_dist;
+                        p.value_ptr.reflections.z_pos_lam += zpart * lam;
+                        total_weight[4] += zpart;
+                    } else {
+                        p.value_ptr.reflections.z_neg_dist += zpart * total_dist;
+                        p.value_ptr.reflections.z_neg_lam += zpart * lam;
+                        total_weight[5] += zpart;
+                    }
+                }
+
+                if (total_weight[0] > 0) {
+                    p.value_ptr.reflections.x_pos_dist /= total_weight[0];
+                    p.value_ptr.reflections.x_pos_lam /= total_weight[0];
+                }
+                if (total_weight[1] > 0) {
+                    p.value_ptr.reflections.x_neg_dist /= total_weight[1];
+                    p.value_ptr.reflections.x_neg_lam /= total_weight[1];
+                }
+                if (total_weight[2] > 0) {
+                    p.value_ptr.reflections.y_pos_dist /= total_weight[2];
+                    p.value_ptr.reflections.y_pos_lam /= total_weight[2];
+                }
+                if (total_weight[3] > 0) {
+                    p.value_ptr.reflections.y_neg_dist /= total_weight[3];
+                    p.value_ptr.reflections.y_neg_lam /= total_weight[3];
+                }
+                if (total_weight[4] > 0) {
+                    p.value_ptr.reflections.z_pos_dist /= total_weight[4];
+                    p.value_ptr.reflections.z_pos_lam /= total_weight[4];
+                }
+                if (total_weight[5] > 0) {
+                    p.value_ptr.reflections.z_neg_dist /= total_weight[5];
+                    p.value_ptr.reflections.z_neg_lam /= total_weight[5];
+                }
+
+                std.debug.print("{}\n", .{p.value_ptr.reflections});
+
                 p.value_ptr.reverb.feedback_gain =
-                    @sqrt((26.0 - capped_mean_dist) / 25.0);
+                    @sqrt((51.0 - capped_mean_dist) / 50.0);
                 p.value_ptr.wet =
-                    ((50.0 - capped_mean_dist) / 50.0) * ((50.0 - capped_mean_dist) / 50.0);
+                    ((100.0 - capped_mean_dist) / 100.0) * ((100.0 - capped_mean_dist) / 100.0);
             }
         }
         // end audio state update
@@ -824,11 +944,21 @@ const raycast_sphere_pattern = [_][3]f32{
     .{ 0, 0, 1 },
     .{ 0, 0, -1 },
     .{ 1, 1, 1 },
+    .{ -1, -1, -1 },
     .{ 1, 1, -1 },
+    .{ -1, -1, 1 },
     .{ 1, -1, 1 },
+    .{ -1, 1, -1 },
     .{ 1, -1, -1 },
     .{ -1, 1, 1 },
-    .{ -1, 1, -1 },
-    .{ -1, -1, 1 },
-    .{ -1, -1, -1 },
 };
+
+fn computeNormal(triangle: []Vertex) [3]f32 {
+    const a = zm.loadArr3(triangle[0].pos);
+    const b = zm.loadArr3(triangle[1].pos);
+    const c = zm.loadArr3(triangle[2].pos);
+    const ab = b - a;
+    const ac = c - a;
+    const normal = zm.normalize3(zm.cross3(ab, ac));
+    return zm.vecToArr3(normal);
+}
