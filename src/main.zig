@@ -651,10 +651,13 @@ pub fn main() !void {
 
                 std.debug.print("{}\n", .{p.value_ptr.reflections});
 
+                // TODO make these values less shit
+                std.debug.print("{}\n", .{capped_mean_dist});
                 p.value_ptr.reverb.feedback_gain =
-                    @sqrt((51.0 - capped_mean_dist) / 50.0);
+                    0.5 * @sqrt((51.0 - capped_mean_dist) / 50.0);
                 p.value_ptr.wet =
-                    ((100.0 - capped_mean_dist) / 100.0) * ((100.0 - capped_mean_dist) / 100.0);
+                    0.5 * ((101.0 - capped_mean_dist) / 100.0) * ((101.0 - capped_mean_dist) / 100.0);
+                std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
             }
         }
         // end audio state update
@@ -825,7 +828,7 @@ const Camera = struct {
 
     const up = zm.f32x4(0.0, 1.0, 0.0, 0.0);
     const mouse_sensitivity = 0.3;
-    const move_speed = 5;
+    const move_speed = 2;
 
     fn update(camera: *Camera, input: *Input) void {
         camera.prev_pos = camera.pos;
