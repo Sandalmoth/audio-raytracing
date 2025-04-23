@@ -10,6 +10,14 @@ const SpaceBuilder = @import("raytracer.zig").Builder;
 
 const log = std.log;
 
+// TODO
+// make non-repeating sounds have reflections
+// confirm that reflections work as expected
+// add sound occlusion (via bidirectional raycast)
+// improve the reverb computation, also take source env into account
+// add footsteps
+// make the sound source movable
+
 pub const ticks_per_second = 83;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
 pub const tick_ns: u64 = 1000_000_000 / ticks_per_second;
@@ -284,7 +292,7 @@ pub fn main() !void {
         @memcpy(
             bytes,
             &[_][4]u8{
-                .{ 0, 0, 0, 0xff },
+                .{ 0, 0, 0xff, 0xff },
                 .{ 0xff, 0, 0, 0xff },
                 .{ 0, 0xff, 0, 0xff },
                 .{ 0xff, 0xff, 0, 0xff },
@@ -679,16 +687,30 @@ pub fn main() !void {
         @memcpy(
             bytes,
             &[_]Vertex{
+                // quad for backbuffer -> swapchain renderpass
                 .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 0 } },
                 .{ .pos = .{ 1, 1, 0 }, .uv = .{ 1, 0 } },
                 .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
                 .{ .pos = .{ -1, 1, 0 }, .uv = .{ 0, 0 } },
                 .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
                 .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 1 } },
-            }, // quad for backbuffer -> swapchain renderpass
+                // tetrahedron for the music source
+                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 1 } },
+            },
         );
         @memcpy(
-            bytes + 6,
+            bytes + 18,
             vertices.items,
         );
         sdl.c.SDL_UnmapGPUTransferBuffer(gpu_device, transfer_buffer);
@@ -699,7 +721,7 @@ pub fn main() !void {
         }, &.{
             .buffer = vertex_buffer,
             .offset = 0,
-            .size = @sizeOf(Vertex) * (6 + @as(u32, @intCast(vertices.items.len))),
+            .size = @sizeOf(Vertex) * (18 + @as(u32, @intCast(vertices.items.len))),
         }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
 
@@ -739,7 +761,8 @@ pub fn main() !void {
             &state.camera.vp(alpha),
             @sizeOf(zm.Mat),
         );
-        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, @intCast(vertices.items.len), 1, 6, 0);
+        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, 12, 1, 6, 0);
+        sdl.c.SDL_DrawGPUPrimitives(main_render_pass, @intCast(vertices.items.len), 1, 18, 0);
         sdl.c.SDL_EndGPURenderPass(main_render_pass);
 
         var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
