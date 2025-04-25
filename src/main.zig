@@ -16,7 +16,6 @@ const log = std.log;
 // add sound occlusion (via bidirectional raycast)
 // improve the reverb computation, also take source env into account
 // add footsteps
-// make the sound source movable
 
 pub const ticks_per_second = 83;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
@@ -36,7 +35,7 @@ pub fn main() !void {
     }
     defer sdl.c.SDL_Quit();
 
-    const window = sdl.c.SDL_CreateWindow("audio-raytracing", 800, 600, 0) orelse {
+    const window = sdl.c.SDL_CreateWindow("audio-raytracing", 1024, 768, 0) orelse {
         log.err("SDL_CreateWindow: {s}", .{sdl.c.SDL_GetError()});
         return error.Sdl;
     };
@@ -427,19 +426,20 @@ pub fn main() !void {
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_SPACE }, .up);
     try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_LCTRL }, .down);
     try input.map.put(.{ .mouse = sdl.c.SDL_BUTTON_LEFT }, .fire);
+    try input.map.put(.{ .keyboard = sdl.c.SDL_SCANCODE_E }, .grab);
     defer input.deinit();
 
     const sound_system = try SoundSystem.init(gpa);
     defer sound_system.deinit();
 
     const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
+    var music_pos = zm.f32x4(0.0, 0.0, 0.0, 0.0);
     const music_handle = try sound_system.playSound(.{
         .sound = music,
-        .pos = zm.f32x4(0.0, 0.0, 0.0, 0.0),
+        .pos = music_pos,
         .repeat = true,
         .gain = 1.0,
     });
-    _ = music_handle;
 
     const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
 
@@ -495,6 +495,11 @@ pub fn main() !void {
                 state.camera.yaw,
                 0,
             );
+
+            if (input.peek(.grab).held) {
+                music_pos = state.camera.pos;
+                sound_system.playing.getPtr(music_handle).?.pos = music_pos;
+            }
 
             // TODO make this actually mathematically interesting
             // I think this strategy of doing paired opposite distances for reverbs is good
@@ -695,18 +700,18 @@ pub fn main() !void {
                 .{ .pos = .{ 1, -1, 0 }, .uv = .{ 1, 1 } },
                 .{ .pos = .{ -1, -1, 0 }, .uv = .{ 0, 1 } },
                 // tetrahedron for the music source
-                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
-                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
-                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ 0.0, 0.0, 0.2 }, .uv = .{ 0, 1 } },
-                .{ .pos = .{ 0.1, 0.1, -0.1 }, .uv = .{ 0, 0 } },
-                .{ .pos = .{ 0.1, -0.1, -0.1 }, .uv = .{ 1, 0 } },
-                .{ .pos = .{ -0.1, 0.1, -0.1 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] - 0.1, music_pos[2] - 0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.0, music_pos[1] + 0.0, music_pos[2] + 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ music_pos[0] - 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] - 0.1, music_pos[2] - 0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.0, music_pos[1] + 0.0, music_pos[2] + 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ music_pos[0] - 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.0, music_pos[1] + 0.0, music_pos[2] + 0.2 }, .uv = .{ 0, 1 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 0, 0 } },
+                .{ .pos = .{ music_pos[0] + 0.1, music_pos[1] - 0.1, music_pos[2] - 0.1 }, .uv = .{ 1, 0 } },
+                .{ .pos = .{ music_pos[0] - 0.1, music_pos[1] + 0.1, music_pos[2] - 0.1 }, .uv = .{ 0, 1 } },
             },
         );
         @memcpy(
