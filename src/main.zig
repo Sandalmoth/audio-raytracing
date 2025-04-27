@@ -12,9 +12,7 @@ const log = std.log;
 
 // TODO
 // make non-repeating sounds have reflections
-// confirm that reflections work as expected
 // add sound occlusion (via bidirectional raycast)
-// improve the reverb computation, also take source env into account
 // add footsteps
 
 pub const ticks_per_second = 83;
@@ -539,9 +537,13 @@ pub fn main() !void {
                 std.debug.print("{} {}\n", .{ best, dist });
 
                 if (j % 2 == 0) {
-                    tmp_dist = @min(dist, 25.0);
+                    // tmp_dist = @min(dist, 25.0);
+                    tmp_dist = dist;
+                    // tmp_dist = 1.0 / (dist * dist + 2);
                 } else {
-                    capped_mean_dist += @min(dist, 25.0) + tmp_dist;
+                    // capped_mean_dist += @min(dist, 25.0) + tmp_dist;
+                    // capped_mean_dist += dist + tmp_dist;
+                    capped_mean_dist = 1.0 / ((tmp_dist + dist) * (tmp_dist + dist) + 2);
                 }
 
                 if (best != std.math.maxInt(u32)) {
@@ -664,12 +666,10 @@ pub fn main() !void {
 
                 std.debug.print("{}\n", .{p.value_ptr.reflections});
 
-                // TODO make these values less shit
                 std.debug.print("{}\n", .{capped_mean_dist});
-                p.value_ptr.reverb.feedback_gain =
-                    0.5 * @sqrt((51.0 - capped_mean_dist) / 50.0);
-                p.value_ptr.wet =
-                    0.5 * ((101.0 - capped_mean_dist) / 100.0) * ((101.0 - capped_mean_dist) / 100.0);
+                // would be nice to blend these more softly over time maybe
+                p.value_ptr.reverb.feedback_gain = std.math.atan(100 * capped_mean_dist);
+                p.value_ptr.wet = std.math.atan(100 * capped_mean_dist);
                 std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
             }
         }
