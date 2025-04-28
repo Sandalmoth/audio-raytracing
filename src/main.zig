@@ -440,6 +440,7 @@ pub fn main() !void {
     });
 
     const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
+    // const footstep = try sound_system.loadSound("data/sounds/footstep.wav");
 
     var state = try State.init(gpa);
     defer state.deinit();
@@ -468,7 +469,7 @@ pub fn main() !void {
             state.camera.update(&input);
 
             if (input.peek(.fire).pressed) {
-                _ = try sound_system.playSound(.{ .sound = blip, .pos = zm.f32x4s(0.0), .gain = 0.2 });
+                _ = try sound_system.playSound(.{ .sound = blip, .pos = state.camera.pos, .gain = 0.2 });
             }
 
             input.decay();
@@ -668,8 +669,8 @@ pub fn main() !void {
 
                 std.debug.print("{}\n", .{capped_mean_dist});
                 // would be nice to blend these more softly over time maybe
-                p.value_ptr.reverb.feedback_gain = std.math.atan(100 * capped_mean_dist);
-                p.value_ptr.wet = std.math.atan(100 * capped_mean_dist);
+                p.value_ptr.reverb.feedback_gain = 0.5 * std.math.atan(100 * capped_mean_dist);
+                p.value_ptr.wet = 0.5 * std.math.atan(100 * capped_mean_dist);
                 std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
             }
         }
