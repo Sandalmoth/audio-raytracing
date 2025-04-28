@@ -499,10 +499,10 @@ pub fn main() !void {
                 sound_system.playing.getPtr(music_handle).?.pos = music_pos;
             }
 
-            // TODO make this actually mathematically interesting
             // I think this strategy of doing paired opposite distances for reverbs is good
             // because you need things in both directions to get reverb, otherwise it's just echo
-            // however, as-is, this doesn't really work as intended
+            // even better would be though if we took the normals at the paired points into account
+            // and scale by their dot product, s.t. standing in a corner doesn't produce reverb
             var capped_mean_dist: f32 = 0;
             var tmp_dist: f32 = 0;
             var hit_dists: [raycast_sphere_pattern.len]f32 = undefined;
@@ -602,10 +602,21 @@ pub fn main() !void {
                     // reconstruct the original listener-ray and use to partition reflections
                     const ld = zm.vecToArr3(state.camera.pos - zm.loadArr3(point));
                     const total_dist = dist2 + dist;
+                    // base the reflection of a diffuse component (lambert diffuse)
+                    // with a specular component (e.g. blinn phong but for sound)
+                    // because sound is much more a specular thing than a diffuse thing typically
                     const lam = @abs(zm.dot3(
                         zm.loadArr3(normal),
                         zm.normalize3(zm.loadArr3(dir)),
-                    )[0]);
+                    )[0]) + std.math.pow(
+                        f32,
+                        @max(zm.dot3(
+                            zm.loadArr3(normal),
+                            zm.normalize3(zm.normalize3(zm.loadArr3(dir)) +
+                                zm.normalize3(state.camera.pos - p.value_ptr.pos)),
+                        )[0], 0),
+                        16.0,
+                    );
                     const xpart = ld[0] * ld[0];
                     const ypart = ld[1] * ld[1];
                     const zpart = ld[2] * ld[2];
