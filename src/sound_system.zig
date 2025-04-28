@@ -327,7 +327,7 @@ fn buildAmbisonicReverb(
             std.debug.assert(!p.repeat);
             const begin = @min(p.cursor, samples.len);
             const end = @min(p.cursor + 128, samples.len);
-            for (begin..end, 0..) |i, k| {
+            for (begin..end, 0..) |_, k| {
                 // reverb_input[k] = samples[i] * p.gain;
                 // for (0..4) |j| {
                 // const sample = p.attenuation_eq.apply(
@@ -335,31 +335,108 @@ fn buildAmbisonicReverb(
                 // );
                 // buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 2);
                 // }
-                const d = std.math.lerp(
-                    p.prev_dist.?,
-                    dist,
-                    @as(f32, @floatFromInt(128 * frame_index + k)) /
-                        @as(f32, @floatFromInt(128 * total_frames)),
-                );
-                // std.debug.print("{} {} {}\n", .{ d, p.prev_dist.?, dist });
-                var foff = @as(f32, @floatFromInt(p.cursor)) -
-                    44100 * d / speed_of_sound;
-                if (foff < 0.0) foff = 0;
-                const ioff = @as(usize, @intFromFloat(foff));
-                const beta = foff - @trunc(foff);
-                std.debug.print("{} {d:.2}\n", .{ ioff, beta });
-                _ = i;
-                const sample = std.math.lerp(
-                    if (ioff + k + 1 < end) samples[ioff + k + 1] else 0.0,
-                    if (ioff + k < end) samples[ioff + k] else 0.0,
-                    1.0 - beta,
-                );
-                // std.debug.print("sample {} {} {} {} {}\n", .{ d, begin, end, ioff, sample });
-                reverb_input[k] = sample * p.gain / (dist + 2);
-                for (0..4) |j| buf[j][k] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
+                {
+                    const d = std.math.lerp(
+                        p.prev_dist.?,
+                        dist,
+                        @as(f32, @floatFromInt(128 * frame_index + k)) /
+                            @as(f32, @floatFromInt(128 * total_frames)),
+                    );
+                    // std.debug.print("{} {} {}\n", .{ d, p.prev_dist.?, dist });
+                    var foff = @as(f32, @floatFromInt(p.cursor)) -
+                        44100 * d / speed_of_sound;
+                    if (foff < 0.0) foff = 0;
+                    const ioff = @as(usize, @intFromFloat(foff));
+                    const beta = foff - @trunc(foff);
+                    std.debug.print("{} {d:.2}\n", .{ ioff, beta });
+                    const sample = std.math.lerp(
+                        if (ioff + k + 1 < end) samples[ioff + k + 1] else 0.0,
+                        if (ioff + k < end) samples[ioff + k] else 0.0,
+                        1.0 - beta,
+                    );
+                    // std.debug.print("sample {} {} {} {} {}\n", .{ d, begin, end, ioff, sample });
+                    reverb_input[k] = sample * p.gain / (dist + 2);
+                    for (0..4) |j| buf[j][k] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
+                }
 
                 // reflections go here
+                const i = k;
+                var sample: f32 = undefined;
+                // std.debug.print("{}\n", .{p.reflections});
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.x_pos_dist_prev.?,
+                    p.reflections.x_pos_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.x_pos_lam / (p.reflections.x_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[1][i] += sample;
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.x_neg_dist_prev.?,
+                    p.reflections.x_neg_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.x_neg_lam / (p.reflections.x_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[1][i] -= sample;
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.y_pos_dist_prev.?,
+                    p.reflections.y_pos_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.y_pos_lam / (p.reflections.y_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[2][i] += sample;
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.y_neg_dist_prev.?,
+                    p.reflections.y_neg_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.y_neg_lam / (p.reflections.y_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[2][i] -= sample;
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.z_pos_dist_prev.?,
+                    p.reflections.z_pos_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.z_pos_lam / (p.reflections.z_pos_dist + 1);
+                buf[0][i] += sample;
+                buf[3][i] += sample;
+                sample = dopplerReflectionResample2(
+                    p,
+                    p.reflections.z_neg_dist_prev.?,
+                    p.reflections.z_neg_dist,
+                    frame_index,
+                    i,
+                    total_frames,
+                    samples,
+                    end,
+                ) * p.gain * p.reflections.z_neg_lam / (p.reflections.z_neg_dist + 1);
+                buf[0][i] += sample;
+                buf[3][i] -= sample;
             }
+
             p.cursor += 128;
             if (p.cursor >= samples.len + 65536) {
                 p.finished = true;
@@ -370,9 +447,9 @@ fn buildAmbisonicReverb(
         p.reverb.apply(reverb_input, buf2);
 
         // apply reverb nondirectionally
-        // for (0..frame_size) |i| {
-        // buf[0][i] += p.wet * buf2[i];
-        // }
+        for (0..frame_size) |i| {
+            buf[0][i] += p.wet * buf2[i];
+        }
 
         if (frame_index + 1 == total_frames) {
             p.prev_dist = dist;
@@ -717,6 +794,7 @@ fn dopplerReflectionResample2(
     i: usize,
     total_frames: usize,
     samples: []const f32,
+    end: usize,
 ) f32 {
     const d = std.math.lerp(
         prev_dist,
@@ -730,8 +808,8 @@ fn dopplerReflectionResample2(
     const ioff = @as(usize, @intFromFloat(foff));
     const beta = foff - @trunc(foff);
     const sample = std.math.lerp(
-        samples[(ioff + i + 1) % samples.len],
-        samples[(ioff + i) % samples.len],
+        if (ioff + i + 1 < end) samples[ioff + i + 1] else 0.0,
+        if (ioff + i < end) samples[ioff + i] else 0.0,
         beta,
     );
     return sample;

@@ -11,7 +11,6 @@ const SpaceBuilder = @import("raytracer.zig").Builder;
 const log = std.log;
 
 // TODO
-// make non-repeating sounds have reflections
 // add sound occlusion (via bidirectional raycast)
 // add footsteps
 
