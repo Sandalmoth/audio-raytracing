@@ -124,8 +124,8 @@ fn callback(
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     system.mutex.lock();
     defer system.mutex.unlock();
-    // var t = std.time.Timer.start() catch unreachable;
-    // defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
+    var t = std.time.Timer.start() catch unreachable;
+    defer std.debug.print("callback\t{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
 
     var n_samples = @divTrunc(additional_amount, 2 * @sizeOf(f32));
     _ = total_amount;
@@ -217,16 +217,17 @@ fn buildAmbisonicReverb(
 
         p.attenuation_eq.gains = std.math.clamp(
             @as(@Vector(4, f32), @splat(1.0)) -
-                @as(@Vector(4, f32), @splat(1e-5 * dist)) * Equalizer.freqs,
+                @as(@Vector(4, f32), @splat(1e-5 * dist * (p.occlusion + 1))) * Equalizer.freqs,
             @as(@Vector(4, f32), @splat(0.0)),
             @as(@Vector(4, f32), @splat(1.0)),
         ); // air absorbtion
         // std.debug.print("{}\n", .{p.attenuation_eq.gains});
         p.attenuation_eq.gains *= @splat(1 / (dist + 1)); // distance attenuation
+        p.attenuation_eq.gains *= @splat(1 / (p.occlusion + 1)); // occlusion attenuation
 
         var reverb_input = std.mem.zeroes([frame_size]f32);
 
-        std.debug.print("{}\n", .{p.repeat});
+        // std.debug.print("{}\n", .{p.repeat});
         if (p.repeat) {
             std.debug.assert(p.repeat);
             for (0..128) |i| {
@@ -248,7 +249,7 @@ fn buildAmbisonicReverb(
                         samples[(ioff + i - 1) % samples.len],
                         beta,
                     );
-                    reverb_input[i] = sample * p.gain / (dist + 2);
+                    reverb_input[i] = sample * p.gain / (dist + 2) / (p.occlusion + 2);
                     for (0..4) |j| buf[j][i] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
                 }
 
@@ -348,14 +349,14 @@ fn buildAmbisonicReverb(
                     if (foff < 0.0) foff = 0;
                     const ioff = @as(usize, @intFromFloat(foff));
                     const beta = foff - @trunc(foff);
-                    std.debug.print("{} {d:.2}\n", .{ ioff, beta });
+                    // std.debug.print("{} {d:.2}\n", .{ ioff, beta });
                     const sample = std.math.lerp(
                         if (ioff + k + 1 < end) samples[ioff + k + 1] else 0.0,
                         if (ioff + k < end) samples[ioff + k] else 0.0,
                         1.0 - beta,
                     );
                     // std.debug.print("sample {} {} {} {} {}\n", .{ d, begin, end, ioff, sample });
-                    reverb_input[k] = sample * p.gain / (dist + 2);
+                    reverb_input[k] = sample * p.gain / (dist + 2) / (p.occlusion + 2);
                     for (0..4) |j| buf[j][k] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
                 }
 
@@ -440,7 +441,7 @@ fn buildAmbisonicReverb(
             p.cursor += 128;
             if (p.cursor >= samples.len + 65536) {
                 p.finished = true;
-                std.debug.print("triggered finish\n", .{});
+                // std.debug.print("triggered finish\n", .{});
             }
         }
 
@@ -535,8 +536,9 @@ const Playing = struct {
     finished: bool = false,
     attenuation_eq: Equalizer = .{},
     reverb: Reverb = .init,
-    wet: f32 = 0.00,
+    wet: f32 = 0.0,
     reflections: Reflections = .{},
+    occlusion: f32 = 0.0, // occluded distance
 };
 
 const Equalizer = struct {

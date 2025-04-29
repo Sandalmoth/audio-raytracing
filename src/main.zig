@@ -12,7 +12,6 @@ const log = std.log;
 
 // TODO
 // add sound occlusion (via bidirectional raycast)
-// add footsteps
 
 pub const ticks_per_second = 83;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
@@ -344,7 +343,7 @@ pub fn main() !void {
         var it = std.mem.tokenizeAny(u8, bytes, "\n");
         while (it.next()) |line| {
             if (std.mem.eql(u8, line[0..2], "vt")) {
-                std.debug.print("tex\t{s}\n", .{line});
+                // std.debug.print("tex\t{s}\n", .{line});
                 var it2 = std.mem.tokenizeAny(u8, line, " ");
                 _ = it2.next();
                 try raw_uvs.append(.{
@@ -352,7 +351,7 @@ pub fn main() !void {
                     try std.fmt.parseFloat(f32, it2.next().?),
                 });
             } else if (std.mem.eql(u8, line[0..1], "v")) {
-                std.debug.print("vertex\t{s}\n", .{line});
+                // std.debug.print("vertex\t{s}\n", .{line});
                 var it2 = std.mem.tokenizeAny(u8, line, " ");
                 _ = it2.next();
                 try raw_vertices.append(.{
@@ -361,7 +360,7 @@ pub fn main() !void {
                     try std.fmt.parseFloat(f32, it2.next().?),
                 });
             } else if (std.mem.eql(u8, line[0..1], "f")) {
-                std.debug.print("face\t{s}\n", .{line});
+                // std.debug.print("face\t{s}\n", .{line});
                 var it2 = std.mem.tokenizeAny(u8, line, " /");
                 _ = it2.next();
                 try triangles.append(.{
@@ -435,11 +434,12 @@ pub fn main() !void {
         .sound = music,
         .pos = music_pos,
         .repeat = true,
-        .gain = 1.0,
+        .gain = 0.5,
     });
 
     const blip = try sound_system.loadSound("data/sounds/blipSelect.wav");
-    // const footstep = try sound_system.loadSound("data/sounds/footstep.wav");
+    const footstep = try sound_system.loadSound("data/sounds/footstep.wav");
+    var walk_counter: f32 = 0.0;
 
     var state = try State.init(gpa);
     defer state.deinit();
@@ -471,6 +471,39 @@ pub fn main() !void {
                 _ = try sound_system.playSound(.{ .sound = blip, .pos = state.camera.pos, .gain = 0.2 });
             }
 
+            walk_counter += zm.length3(state.camera.pos - state.camera.prev_pos)[0];
+            if (walk_counter > 1.0) {
+                // raycast down to find the footstep position
+                const src: [3]f32 = .{
+                    state.camera.pos[0],
+                    state.camera.pos[1],
+                    state.camera.pos[2],
+                };
+                const isects, const n = space.raycastCapacity(src, .{ 0, -1, 0 }, 128);
+                var best: u32 = std.math.maxInt(u32);
+                var dist: f32 = std.math.inf(f32);
+                for (isects[0..n]) |i| {
+                    const d, _ = rayTriangleIntersection(
+                        src,
+                        .{ 0, -1, 0 },
+                        vertices.items[i].pos,
+                        vertices.items[i + 1].pos,
+                        vertices.items[i + 2].pos,
+                    ) orelse continue;
+                    if (d < dist) {
+                        dist = d;
+                        best = @intCast(i);
+                    }
+                }
+                // std.debug.print("{} {}\n", .{ best, dist });
+                _ = try sound_system.playSound(.{
+                    .sound = footstep,
+                    .pos = state.camera.pos + zm.loadArr3(.{ 0, -1, 0 }) * zm.f32x4s(0.95 * dist),
+                    .gain = 0.5,
+                });
+                walk_counter = 0.0;
+            }
+
             input.decay();
             // end update
 
@@ -485,7 +518,7 @@ pub fn main() !void {
             sound_system.mutex.lock();
             defer sound_system.mutex.unlock();
             var t = std.time.Timer.start() catch unreachable;
-            defer std.debug.print("{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
+            defer std.debug.print("update  \t{d:.2}\n", .{@as(f64, @floatFromInt(t.lap())) * 1e-6});
 
             sound_system.listener = state.camera.pos;
             sound_system.orientation = zm.quatFromRollPitchYaw(
@@ -534,7 +567,7 @@ pub fn main() !void {
                         best = @intCast(i);
                     }
                 }
-                std.debug.print("{} {}\n", .{ best, dist });
+                // std.debug.print("{} {}\n", .{ best, dist });
 
                 if (j % 2 == 0) {
                     // tmp_dist = @min(dist, 25.0);
@@ -558,14 +591,87 @@ pub fn main() !void {
             }
             capped_mean_dist /= @as(f32, @floatFromInt(raycast_sphere_pattern.len));
 
-            std.debug.print("distance: {}\n", .{capped_mean_dist});
-            std.debug.print("{any}\n", .{hit_dists[0..n_hits]});
-            std.debug.print("{any}\n", .{hit_normals[0..n_hits]});
+            // std.debug.print("distance: {}\n", .{capped_mean_dist});
+            // std.debug.print("{any}\n", .{hit_dists[0..n_hits]});
+            // std.debug.print("{any}\n", .{hit_normals[0..n_hits]});
 
+            // OCCLUSION
             var it = sound_system.playing.iterator();
             while (it.next()) |p| {
+                // raycast from source to listener and from listener to source
+                // measure the distance that is occluded
+                var dist0: f32 = std.math.inf(f32);
+                var dist1: f32 = std.math.inf(f32);
 
-                // now raycast for the reflections
+                if (zm.lengthSq3(state.camera.pos - p.value_ptr.pos)[0] < 1e-3) {
+                    dist0 = 0.0;
+                    dist1 = 0.0;
+                } else {
+                    {
+                        const src: [3]f32 = .{
+                            state.camera.pos[0],
+                            state.camera.pos[1],
+                            state.camera.pos[2],
+                        };
+                        const dir: [3]f32 = .{
+                            p.value_ptr.pos[0] - src[0],
+                            p.value_ptr.pos[1] - src[1],
+                            p.value_ptr.pos[2] - src[2],
+                        };
+                        const isects, const n = space.raycastCapacity(src, dir, 128);
+                        var best: u32 = std.math.maxInt(u32);
+                        for (isects[0..n]) |i| {
+                            const d, _ = rayTriangleIntersection(
+                                src,
+                                dir,
+                                vertices.items[i].pos,
+                                vertices.items[i + 1].pos,
+                                vertices.items[i + 2].pos,
+                            ) orelse continue;
+                            if (d < dist0) {
+                                dist0 = d;
+                                best = @intCast(i);
+                            }
+                        }
+                    }
+                    {
+                        const src: [3]f32 = .{
+                            p.value_ptr.pos[0],
+                            p.value_ptr.pos[1],
+                            p.value_ptr.pos[2],
+                        };
+                        const dir: [3]f32 = .{
+                            state.camera.pos[0] - src[0],
+                            state.camera.pos[1] - src[1],
+                            state.camera.pos[2] - src[2],
+                        };
+                        const isects, const n = space.raycastCapacity(src, dir, 128);
+                        var best: u32 = std.math.maxInt(u32);
+                        for (isects[0..n]) |i| {
+                            const d, _ = rayTriangleIntersection(
+                                src,
+                                dir,
+                                vertices.items[i].pos,
+                                vertices.items[i + 1].pos,
+                                vertices.items[i + 2].pos,
+                            ) orelse continue;
+                            if (d < dist1) {
+                                dist1 = d;
+                                best = @intCast(i);
+                            }
+                        }
+                    }
+                }
+
+                const maxdist = zm.length3(state.camera.pos - p.value_ptr.pos)[0];
+                p.value_ptr.occlusion = @max(0.0, maxdist - (dist0 + dist1));
+            }
+
+            // REFLECTIONS
+            it = sound_system.playing.iterator();
+            while (it.next()) |p| {
+
+                // raycast to each of the precomputed listener relflection points
                 p.value_ptr.reflections = .{};
                 var total_weight = std.mem.zeroes([6]f32);
 
@@ -576,14 +682,14 @@ pub fn main() !void {
 
                     const dir = zm.vecToArr3(zm.loadArr3(point) - p.value_ptr.pos);
                     const dist2 = zm.length3(zm.loadArr3(dir))[0];
-                    std.debug.print("{} {}\n", .{ dist, dist2 });
+                    // std.debug.print("{} {}\n", .{ dist, dist2 });
                     if (zm.lengthSq3(zm.loadArr3(dir))[0] > 1e-3) {
                         const isects, const n = space.raycastCapacity(
                             zm.vecToArr3(p.value_ptr.pos),
                             dir,
                             128,
                         );
-                        std.debug.print("{}\n", .{n});
+                        // std.debug.print("{}\n", .{n});
                         for (isects[0..n]) |j| {
                             const d, _ = rayTriangleIntersection(
                                 zm.vecToArr3(p.value_ptr.pos),
@@ -593,7 +699,7 @@ pub fn main() !void {
                                 vertices.items[j + 2].pos,
                             ) orelse continue;
                             if (d > dist2) continue;
-                            std.debug.print("{}\n", .{d});
+                            // std.debug.print("{}\n", .{d});
                             continue :outer;
                         }
                     }
@@ -620,7 +726,7 @@ pub fn main() !void {
                     const xpart = ld[0] * ld[0];
                     const ypart = ld[1] * ld[1];
                     const zpart = ld[2] * ld[2];
-                    std.debug.print("{any} {} {}\n", .{ ld, total_dist, lam });
+                    // std.debug.print("{any} {} {}\n", .{ ld, total_dist, lam });
                     if (ld[0] > 0) {
                         p.value_ptr.reflections.x_pos_dist += xpart * total_dist;
                         p.value_ptr.reflections.x_pos_lam += xpart * lam;
@@ -675,13 +781,13 @@ pub fn main() !void {
                     p.value_ptr.reflections.z_neg_lam /= total_weight[5];
                 }
 
-                std.debug.print("{}\n", .{p.value_ptr.reflections});
+                // std.debug.print("{}\n", .{p.value_ptr.reflections});
 
-                std.debug.print("{}\n", .{capped_mean_dist});
+                // std.debug.print("{}\n", .{capped_mean_dist});
                 // would be nice to blend these more softly over time maybe
                 p.value_ptr.reverb.feedback_gain = 0.5 * std.math.atan(100 * capped_mean_dist);
                 p.value_ptr.wet = 0.5 * std.math.atan(100 * capped_mean_dist);
-                std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
+                // std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
             }
         }
         // end audio state update
