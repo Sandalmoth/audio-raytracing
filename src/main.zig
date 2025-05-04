@@ -10,9 +10,6 @@ const SpaceBuilder = @import("raytracer.zig").Builder;
 
 const log = std.log;
 
-// TODO
-// add sound occlusion (via bidirectional raycast)
-
 pub const ticks_per_second = 83;
 pub const tick: f32 = 1.0 / @as(f32, @floatFromInt(ticks_per_second));
 pub const tick_ns: u64 = 1000_000_000 / ticks_per_second;
@@ -390,10 +387,12 @@ pub fn main() !void {
         }
     }
 
+    // the space is the raycasting acceleration structure
     var space_builder = SpaceBuilder(u32).init(gpa);
     {
         var i: usize = 0;
         std.debug.assert(vertices.items.len % 3 == 0);
+        // insert an aabb into the space for each triangle
         while (i < vertices.items.len) : (i += 3) {
             const v0 = vertices.items[i];
             const v1 = vertices.items[i + 1];
@@ -428,6 +427,7 @@ pub fn main() !void {
     const sound_system = try SoundSystem.init(gpa);
     defer sound_system.deinit();
 
+    // start playing the music right away
     const music = try sound_system.loadSound("data/sounds/space_cadet_training_montage.wav");
     var music_pos = zm.f32x4(0.0, 0.0, 0.0, 0.0);
     const music_handle = try sound_system.playSound(.{
@@ -450,6 +450,7 @@ pub fn main() !void {
 
     frame_timer.reset();
     main_loop: while (true) {
+        // gameloop uses fixed timestep logic, interpolated rendering
         lag += @min(frame_timer.lap(), max_tick_ns);
 
         var event: sdl.c.SDL_Event = undefined;
@@ -473,7 +474,7 @@ pub fn main() !void {
 
             walk_counter += zm.length3(state.camera.pos - state.camera.prev_pos)[0];
             if (walk_counter > 1.0) {
-                // raycast down to find the footstep position
+                // raycast down to find the footstep position to play footstep sound
                 const src: [3]f32 = .{
                     state.camera.pos[0],
                     state.camera.pos[1],
@@ -495,7 +496,6 @@ pub fn main() !void {
                         best = @intCast(i);
                     }
                 }
-                // std.debug.print("{} {}\n", .{ best, dist });
                 _ = try sound_system.playSound(.{
                     .sound = footstep,
                     .pos = state.camera.pos + zm.loadArr3(.{ 0, -1, 0 }) * zm.f32x4s(0.95 * dist),
@@ -511,9 +511,14 @@ pub fn main() !void {
             time += 1.0 / @as(f64, @floatFromInt(ticks_per_second));
         }
 
-        // begin audio state update here maybe?
-        // std.debug.print("{}\n", .{state.camera});
+        // update the audio state
+        // - listener and source positions
+        // - reflection environment
+        // - reverb environment
         // instead of locking, a triple buffer mailbox would prevent audio glitches
+        // and this shoudl probably be on it's own floating timestep (like 10Hz)
+        // to limit the amount of resources used
+        // as hearing isn't really sensitive enough to notice the slower update rate anyway
         {
             sound_system.mutex.lock();
             defer sound_system.mutex.unlock();
@@ -543,6 +548,10 @@ pub fn main() !void {
             var hit_normals: [raycast_sphere_pattern.len][3]f32 = undefined;
             var n_hits: usize = 0;
 
+            // first, raycast in every direction from the listener
+            // record those positions, to use as
+            // - reflection sampling points
+            // - reverb estimation
             for (raycast_sphere_pattern, 0..) |dir, j| {
                 const src: [3]f32 = .{
                     state.camera.pos[0],
@@ -567,15 +576,10 @@ pub fn main() !void {
                         best = @intCast(i);
                     }
                 }
-                // std.debug.print("{} {}\n", .{ best, dist });
 
                 if (j % 2 == 0) {
-                    // tmp_dist = @min(dist, 25.0);
                     tmp_dist = dist;
-                    // tmp_dist = 1.0 / (dist * dist + 2);
                 } else {
-                    // capped_mean_dist += @min(dist, 25.0) + tmp_dist;
-                    // capped_mean_dist += dist + tmp_dist;
                     capped_mean_dist = 1.0 / ((tmp_dist + dist) * (tmp_dist + dist) + 2);
                 }
 
@@ -590,10 +594,6 @@ pub fn main() !void {
                 }
             }
             capped_mean_dist /= @as(f32, @floatFromInt(raycast_sphere_pattern.len));
-
-            // std.debug.print("distance: {}\n", .{capped_mean_dist});
-            // std.debug.print("{any}\n", .{hit_dists[0..n_hits]});
-            // std.debug.print("{any}\n", .{hit_normals[0..n_hits]});
 
             // OCCLUSION
             var it = sound_system.playing.iterator();
@@ -682,14 +682,12 @@ pub fn main() !void {
 
                     const dir = zm.vecToArr3(zm.loadArr3(point) - p.value_ptr.pos);
                     const dist2 = zm.length3(zm.loadArr3(dir))[0];
-                    // std.debug.print("{} {}\n", .{ dist, dist2 });
                     if (zm.lengthSq3(zm.loadArr3(dir))[0] > 1e-3) {
                         const isects, const n = space.raycastCapacity(
                             zm.vecToArr3(p.value_ptr.pos),
                             dir,
                             128,
                         );
-                        // std.debug.print("{}\n", .{n});
                         for (isects[0..n]) |j| {
                             const d, _ = rayTriangleIntersection(
                                 zm.vecToArr3(p.value_ptr.pos),
@@ -699,7 +697,6 @@ pub fn main() !void {
                                 vertices.items[j + 2].pos,
                             ) orelse continue;
                             if (d > dist2) continue;
-                            // std.debug.print("{}\n", .{d});
                             continue :outer;
                         }
                     }
@@ -723,10 +720,10 @@ pub fn main() !void {
                         )[0], 0),
                         16.0,
                     );
+                    // then distribute the reflection across the each cardinal direction
                     const xpart = ld[0] * ld[0];
                     const ypart = ld[1] * ld[1];
                     const zpart = ld[2] * ld[2];
-                    // std.debug.print("{any} {} {}\n", .{ ld, total_dist, lam });
                     if (ld[0] > 0) {
                         p.value_ptr.reflections.x_pos_dist += xpart * total_dist;
                         p.value_ptr.reflections.x_pos_lam += xpart * lam;
@@ -756,6 +753,7 @@ pub fn main() !void {
                     }
                 }
 
+                // and for each cardinal direction, take a weighted mean of the present reflections
                 if (total_weight[0] > 0) {
                     p.value_ptr.reflections.x_pos_dist /= total_weight[0];
                     p.value_ptr.reflections.x_pos_lam /= total_weight[0];
@@ -781,13 +779,11 @@ pub fn main() !void {
                     p.value_ptr.reflections.z_neg_lam /= total_weight[5];
                 }
 
-                // std.debug.print("{}\n", .{p.value_ptr.reflections});
-
-                // std.debug.print("{}\n", .{capped_mean_dist});
+                // set the reverb based on the enviroment around the listener
                 // would be nice to blend these more softly over time maybe
+                // and it would be even better if we took both source and enviroment into account
                 p.value_ptr.reverb.feedback_gain = 0.5 * std.math.atan(100 * capped_mean_dist);
                 p.value_ptr.wet = 0.5 * std.math.atan(100 * capped_mean_dist);
-                // std.debug.print("{} {}\n", .{ p.value_ptr.reverb.feedback_gain, p.value_ptr.wet });
             }
         }
         // end audio state update
@@ -800,6 +796,8 @@ pub fn main() !void {
             return error.Sdl;
         };
 
+        // just upload the whole vertex buffer every frame
+        // definitely not good, but this is not about the renderer
         const bytes: [*]Vertex = @alignCast(@ptrCast(
             sdl.c.SDL_MapGPUTransferBuffer(gpu_device, transfer_buffer, true) orelse {
                 log.err("SDL_MapGPUTransferBuffer: {s}", .{sdl.c.SDL_GetError()});
@@ -847,6 +845,7 @@ pub fn main() !void {
         }, true);
         sdl.c.SDL_EndGPUCopyPass(copy_pass);
 
+        // render to off-screen buffer
         const main_color_target_infos = [_]sdl.c.SDL_GPUColorTargetInfo{.{
             .texture = main_texture,
             .load_op = sdl.c.SDL_GPU_LOADOP_CLEAR,
@@ -887,6 +886,7 @@ pub fn main() !void {
         sdl.c.SDL_DrawGPUPrimitives(main_render_pass, @intCast(vertices.items.len), 1, 18, 0);
         sdl.c.SDL_EndGPURenderPass(main_render_pass);
 
+        // draw the off-screen buffer to the screen
         var swapchain_texture: ?*sdl.c.SDL_GPUTexture = null;
         var swapchain_width: u32 = 0;
         var swapchain_height: u32 = 0;
@@ -976,6 +976,7 @@ const Camera = struct {
     const move_speed = 2;
 
     fn update(camera: *Camera, input: *Input) void {
+        // mouse-look camera
         camera.prev_pos = camera.pos;
         camera.prev_yaw = camera.yaw;
         camera.prev_pitch = camera.pitch;
@@ -1050,8 +1051,6 @@ fn rayTriangleIntersection(
     const b = zm.loadArr3(v1);
     const c = zm.loadArr3(v2);
 
-    // std.debug.print("{}->{}\n{} {} {}\n", .{ src, dir, a, b, c });
-
     const eps: f32 = 1e-6;
 
     const ab = b - a;
@@ -1059,25 +1058,20 @@ fn rayTriangleIntersection(
 
     const h = zm.cross3(dir, ac);
     const d = zm.dot3(ab, h);
-    // std.debug.print("1 {}\n", .{d});
     if (d[0] > -eps and d[0] < eps) return null;
 
     const f = zm.f32x4s(1.0) / d;
     const s = src - a;
     const u = f * zm.dot3(s, h);
-    // std.debug.print("2 {}\n", .{u});
     if (u[0] < 0.0 or u[0] > 1.0) return null;
 
     const q = zm.cross3(s, ab);
     const v = f * zm.dot3(dir, q);
-    // std.debug.print("3\n", .{});
     if (v[0] < 0.0 or u[0] + v[0] > 1.0) return null;
 
     const t = f * zm.dot3(ac, q);
-    // std.debug.print("4\n", .{});
     if (t[0] < eps) return null;
 
-    // std.debug.print("5\n", .{});
     return .{
         t[0],
         undefined, // TODO check if we hit front/back using winding order

@@ -7,36 +7,39 @@ const log = std.log.scoped(.sound_system);
 
 const SoundSystem = @This();
 
-/// sound effects (any sound to go into the spatializer) should have this format
+// sound effects (any sound to go into the spatializer) should have this format
 const sound_effect_spec = sdl.c.SDL_AudioSpec{
     .format = sdl.c.SDL_AUDIO_F32,
     .channels = 1,
     .freq = 44100,
 };
-/// the spiatializer will then output sound in this format
+// the spiatializer will then output sound in this format
 const sound_render_spec = sdl.c.SDL_AudioSpec{
     .format = sdl.c.SDL_AUDIO_F32,
     .channels = 2,
     .freq = 44100,
 };
 
+// head related transfer function, Magnitude least squares format for ambisonic -> stereo
+// shape is [n_ambisonic_channels][n_impulse_response_samples]f32
 const hrtf: struct {
     irs_l: []const []const f32,
     irs_r: []const []const f32,
 } = @import("hrtf.zon");
 
+// audio is rendered in 128 sample chunks (~2.9 ms)
 const frame_size = 128;
 const speed_of_sound = 350.0;
 
 gpa: std.mem.Allocator,
-sounds: std.ArrayListUnmanaged(Sound),
-playing: std.AutoArrayHashMapUnmanaged(usize, Playing),
-playing_counter: usize,
-stream: *sdl.c.SDL_AudioStream,
-listener: zm.Vec,
-orientation: zm.Quat,
-stereo_frame_buffer: [2 * frame_size][2]f32,
-mutex: std.Thread.Mutex,
+sounds: std.ArrayListUnmanaged(Sound), // sounds are the actual data resources that can be played
+playing: std.AutoArrayHashMapUnmanaged(usize, Playing), // keeps track of stuff that's playing
+playing_counter: usize, // unique id for playing sounds
+stream: *sdl.c.SDL_AudioStream, // stream to output sound
+listener: zm.Vec, // position of the listener
+orientation: zm.Quat, // orientation of the listener
+stereo_frame_buffer: [2 * frame_size][2]f32, // note the double length needed for ovrelapping irs
+mutex: std.Thread.Mutex, // callback is separate thread, use this to prevent data races
 
 pub fn init(gpa: std.mem.Allocator) !*SoundSystem {
     const system = try gpa.create(SoundSystem);
@@ -97,6 +100,7 @@ pub fn deinit(system: *SoundSystem) void {
 }
 
 // NOTE automatically freed when the system is freed
+/// load a sound resource and convert to internal format. returns handle to use to play it
 pub fn loadSound(system: *SoundSystem, filename: [*c]const u8) !usize {
     try system.sounds.ensureUnusedCapacity(system.gpa, 1);
     const sound = try Sound.init(filename);
@@ -105,6 +109,7 @@ pub fn loadSound(system: *SoundSystem, filename: [*c]const u8) !usize {
     return result;
 }
 
+/// start playing a sound with the given parameters, returns a handle to modify it later
 pub fn playSound(system: *SoundSystem, p: Playing) !usize {
     system.mutex.lock();
     defer system.mutex.unlock();
@@ -121,6 +126,7 @@ fn callback(
     additional_amount: c_int,
     total_amount: c_int,
 ) callconv(.c) void {
+    // callback called on separate thread by SDL whenever it needs more sound data
     const system = @as(?*SoundSystem, @alignCast(@ptrCast(ctx))).?;
     system.mutex.lock();
     defer system.mutex.unlock();
@@ -132,6 +138,7 @@ fn callback(
 
     var frame_index: usize = 0;
     const total_frames: usize = @as(usize, @intCast(@divTrunc(n_samples, 128))) + 1;
+    // generate audio 128 sample chunks until we have supplied the samples SDL wants
     while (n_samples > 0) : (n_samples -= 128) {
         var ambisonic = std.mem.zeroes([4][frame_size]f32);
         var reverb = std.mem.zeroes([frame_size]f32); // could be a temporary inside buildAR
@@ -146,6 +153,7 @@ fn callback(
             log.err("SDL_PutAudioStreamData: {s}", .{sdl.c.SDL_GetError()});
         }
 
+        // move trailing samples to front of buffer so they can be added to in the next step
         for (0..frame_size) |i| {
             system.stereo_frame_buffer[i] = system.stereo_frame_buffer[i + frame_size];
             system.stereo_frame_buffer[i + frame_size] = .{ 0.0, 0.0 };
@@ -170,6 +178,9 @@ fn buildAmbisonicReverb(
     frame_index: usize,
     total_frames: usize,
 ) void {
+    // sound is built into a world space oriented ambisonic centered on the listener
+    // that ambisonic is then rotated to account for the listener orientation
+    // before being rendered to stereo using a head related transfer function
     // buf - ambisonic
     // buf2 - reverb
     var it = system.playing.iterator();
@@ -220,25 +231,31 @@ fn buildAmbisonicReverb(
                 @as(@Vector(4, f32), @splat(1e-5 * dist * (p.occlusion + 1))) * Equalizer.freqs,
             @as(@Vector(4, f32), @splat(0.0)),
             @as(@Vector(4, f32), @splat(1.0)),
-        ); // air absorbtion
-        // std.debug.print("{}\n", .{p.attenuation_eq.gains});
+        ); // air absorbtion and occlusion. affects low frequencies more than high
+        // tuning these equalizer effects could probably make the sound much more realistic
+
         p.attenuation_eq.gains *= @splat(1 / (dist + 1)); // distance attenuation
         p.attenuation_eq.gains *= @splat(1 / (p.occlusion + 1)); // occlusion attenuation
 
         var reverb_input = std.mem.zeroes([frame_size]f32);
 
-        // std.debug.print("{}\n", .{p.repeat});
+        // iterate over all playing sounds and
+        // - encode them into the ambisonic
+        // - feed them into the reverb
         if (p.repeat) {
             std.debug.assert(p.repeat);
             for (0..128) |i| {
                 {
+                    // use linear inerpolation to get the sample from the source sound
+                    // blend the distance from the old to the new
+                    // use speed of sound and distance to find the offset for a given sample
+                    // this also gives us doppler effect for free
                     const d = std.math.lerp(
                         p.prev_dist.?,
                         dist,
                         @as(f32, @floatFromInt(128 * frame_index + i)) /
                             @as(f32, @floatFromInt(128 * total_frames)),
                     );
-                    // std.debug.print("{} {} {}\n", .{ frame_index, total_frames, d });
                     const foff = @as(f32, @floatFromInt(p.cursor)) +
                         @as(f32, @floatFromInt(samples.len)) -
                         44100 * d / speed_of_sound;
@@ -249,12 +266,16 @@ fn buildAmbisonicReverb(
                         samples[(ioff + i - 1) % samples.len],
                         beta,
                     );
+                    // feed into reverb (note: doesn't use eq, so needs separate attenuation)
                     reverb_input[i] = sample * p.gain / (dist + 2) / (p.occlusion + 2);
+                    // feed into spherical harmonics buffer
                     for (0..4) |j| buf[j][i] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
                 }
 
-                // reflections go here
-                // var offset: usize = 0;
+                // reflection computation
+                // basically, one reflection from each of the six axis directions
+                // they then need the same sampling as the main sound to account for distance
+                // the distance is a weighted consensus based on raycasts in that direction
                 var sample: f32 = undefined;
                 sample = dopplerReflectionResample(
                     p,
@@ -325,17 +346,13 @@ fn buildAmbisonicReverb(
             }
             p.cursor += 128;
         } else {
+            // same as above, but for non-repeating sounds
+            // which need the boundary conditions handled differentply
+            // (this could be abstracted to reduce duplication)
             std.debug.assert(!p.repeat);
             const begin = @min(p.cursor, samples.len);
             const end = @min(p.cursor + 128, samples.len);
             for (begin..end, 0..) |_, k| {
-                // reverb_input[k] = samples[i] * p.gain;
-                // for (0..4) |j| {
-                // const sample = p.attenuation_eq.apply(
-                //     samples[i],
-                // );
-                // buf[j][i - p.cursor] += sh[j] * sample * p.gain / (dist + 2);
-                // }
                 {
                     const d = std.math.lerp(
                         p.prev_dist.?,
@@ -343,27 +360,22 @@ fn buildAmbisonicReverb(
                         @as(f32, @floatFromInt(128 * frame_index + k)) /
                             @as(f32, @floatFromInt(128 * total_frames)),
                     );
-                    // std.debug.print("{} {} {}\n", .{ d, p.prev_dist.?, dist });
                     var foff = @as(f32, @floatFromInt(p.cursor)) -
                         44100 * d / speed_of_sound;
                     if (foff < 0.0) foff = 0;
                     const ioff = @as(usize, @intFromFloat(foff));
                     const beta = foff - @trunc(foff);
-                    // std.debug.print("{} {d:.2}\n", .{ ioff, beta });
                     const sample = std.math.lerp(
                         if (ioff + k + 1 < end) samples[ioff + k + 1] else 0.0,
                         if (ioff + k < end) samples[ioff + k] else 0.0,
                         1.0 - beta,
                     );
-                    // std.debug.print("sample {} {} {} {} {}\n", .{ d, begin, end, ioff, sample });
                     reverb_input[k] = sample * p.gain / (dist + 2) / (p.occlusion + 2);
                     for (0..4) |j| buf[j][k] += sh[j] * p.attenuation_eq.apply(sample) * p.gain;
                 }
 
-                // reflections go here
                 const i = k;
                 var sample: f32 = undefined;
-                // std.debug.print("{}\n", .{p.reflections});
                 sample = dopplerReflectionResample2(
                     p,
                     p.reflections.x_pos_dist_prev.?,
@@ -441,7 +453,8 @@ fn buildAmbisonicReverb(
             p.cursor += 128;
             if (p.cursor >= samples.len + 65536) {
                 p.finished = true;
-                // std.debug.print("triggered finish\n", .{});
+                // if we reach some time past the end of a repeating sound, stop playing it
+                // the extra time is to allow for reverb to fade
             }
         }
 
@@ -465,6 +478,8 @@ fn buildAmbisonicReverb(
 }
 
 fn rotateAmbisonic(system: *SoundSystem, ambisonic: *[4][frame_size]f32) void {
+    // rotating a four component spherical harmonic is just treating the xyz combonents as a vector
+    // and then rotating those with regular quaternion maths
     for (0..frame_size) |i| {
         const a = zm.rotate(
             system.orientation,
@@ -476,18 +491,22 @@ fn rotateAmbisonic(system: *SoundSystem, ambisonic: *[4][frame_size]f32) void {
     }
 }
 
-const identity_ir = blk: {
-    var ir = std.mem.zeroes([frame_size]f32);
-    ir[0] = 1.0;
-    break :blk ir;
-};
+// useful when testing
+// const identity_ir = blk: {
+//     var ir = std.mem.zeroes([frame_size]f32);
+//     ir[0] = 1.0;
+//     break :blk ir;
+// };
 
 fn ambisonicToStereo(system: *SoundSystem, ambisonic: [4][frame_size]f32) void {
+    // use hrtf irs to encode ambisonic as spatialized stereo sound
+    // this is just eight convolutions, one per ambisonic channel for left and right each
     var conv_bufs: [2][2 * frame_size]f32 = undefined;
     for (0..4) |i| {
         convolve(&ambisonic[i], hrtf.irs_l[i], &conv_bufs[0]);
         convolve(&ambisonic[i], hrtf.irs_r[i], &conv_bufs[1]);
         for (0..2 * frame_size) |j| {
+            // add in the overlap from the last convolution
             system.stereo_frame_buffer[j][0] += conv_bufs[0][j];
             system.stereo_frame_buffer[j][1] += conv_bufs[1][j];
         }
@@ -505,6 +524,8 @@ fn convolve(input: []const f32, ir: []const f32, output: []f32) void {
 }
 
 const Reflections = struct {
+    // struct to store info about reflections
+    // a distance, and a strength, for each cardinal direction (+ up/down)
     x_pos_dist: f32 = 0.0,
     x_neg_dist: f32 = 0.0,
     x_pos_lam: f32 = 0.0,
@@ -575,6 +596,9 @@ const Equalizer = struct {
 };
 
 const Reverb = struct {
+    // reverb based on the following
+    // https://signalsmith-audio.co.uk/writing/2021/lets-write-a-reverb/
+
     const diffuser_delays: [4][4]u32 = .{
         .{ 383, 947, 1489, 3571 },
         .{ 31, 449, 937, 2671 },
@@ -711,6 +735,7 @@ const Reverb = struct {
     }
 };
 
+// a sound resource (actual data)
 const Sound = struct {
     buf: [*c]u8,
     len: u32,
@@ -768,6 +793,7 @@ fn dopplerReflectionResample(
     total_frames: usize,
     samples: []const f32,
 ) f32 {
+    // sample sound based on changing distance
     const d = std.math.lerp(
         prev_dist,
         dist,
@@ -798,6 +824,7 @@ fn dopplerReflectionResample2(
     samples: []const f32,
     end: usize,
 ) f32 {
+    // sample sound based on changing distance, non repeating version
     const d = std.math.lerp(
         prev_dist,
         dist,
